@@ -19,6 +19,9 @@ public class InteractionPlugin : ModuleRules
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
 			"ItemInventoryPlugin",
+			"UMG",
+			"Slate",
+			"SlateCore",
 		});
 	}
 }
