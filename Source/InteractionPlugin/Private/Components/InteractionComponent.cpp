@@ -27,6 +27,7 @@ void UInteractionComponent::BeginPlay()
 
 		// Enable tick for channeled interaction updates
 		PrimaryComponentTick.SetTickFunctionEnable(true);
+
 	}
 }
 

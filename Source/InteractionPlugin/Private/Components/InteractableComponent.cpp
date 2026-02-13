@@ -34,11 +34,18 @@ EInteractionResult UInteractableComponent::Interact(AActor* Interactor, FGamepla
 		return EInteractionResult::NotAllowed;
 	}
 
-	// Verify the requested interaction type is one of our options
+	// Resolve interaction type: if none specified, use the first available option
+	FGameplayTag ResolvedType = InteractionType;
+	if (!ResolvedType.IsValid() && InteractionOptions.Num() > 0)
+	{
+		ResolvedType = InteractionOptions[0].InteractionType;
+	}
+
+	// Verify the resolved interaction type is one of our options
 	bool bValidOption = false;
 	for (const FInteractionOption& Option : InteractionOptions)
 	{
-		if (Option.InteractionType == InteractionType)
+		if (Option.InteractionType == ResolvedType)
 		{
 			bValidOption = true;
 			break;
@@ -54,12 +61,12 @@ EInteractionResult UInteractableComponent::Interact(AActor* Interactor, FGamepla
 	EInteractionResult Result = EInteractionResult::Success;
 	if (InteractionHandler)
 	{
-		Result = InteractionHandler(Interactor, InteractionType);
+		Result = InteractionHandler(Interactor, ResolvedType);
 	}
 
 	if (Result == EInteractionResult::Success)
 	{
-		OnInteractionTriggered.Broadcast(Interactor, InteractionType);
+		OnInteractionTriggered.Broadcast(Interactor, ResolvedType);
 	}
 
 	return Result;

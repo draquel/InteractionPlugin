@@ -18,6 +18,10 @@ AWorldItem::AWorldItem()
 	MeshComponent = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("MeshComponent"));
 	RootComponent = MeshComponent;
 	MeshComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	MeshComponent->SetCollisionObjectType(ECC_WorldDynamic);
+	MeshComponent->SetCollisionResponseToAllChannels(ECR_Block);
+	MeshComponent->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Overlap);
+	MeshComponent->SetGenerateOverlapEvents(true);
 	MeshComponent->SetSimulatePhysics(false);
 	MeshComponent->SetVisibility(false);
 
@@ -90,9 +94,9 @@ void AWorldItem::InitializeFromItem(const FItemInstance& Item)
 		MeshComponent->SetVisibility(true);
 	}
 
-	// Enable collision and physics
+	// Enable collision for overlap detection (no physics — items stay where spawned)
 	MeshComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-	MeshComponent->SetSimulatePhysics(true);
+	MeshComponent->SetSimulatePhysics(false);
 }
 
 void AWorldItem::OnMeshLoaded()
