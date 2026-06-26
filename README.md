@@ -1,6 +1,6 @@
 # InteractionPlugin
 
-General-purpose world interaction framework for Unreal Engine 5.7. Handles detecting nearby interactable objects, selecting the best candidate, and executing interactions with full multiplayer support.
+General-purpose world interaction framework for Unreal Engine 5.8. Handles detecting nearby interactable objects, selecting the best candidate, and executing interactions with full multiplayer support.
 
 ## What This Plugin Does
 
@@ -37,7 +37,7 @@ A convenience component for making any actor interactable without writing C++. A
 
 ## Requirements
 
-- Unreal Engine 5.7
+- Unreal Engine 5.8
 - [CommonGameFramework](../CommonGameFramework/) plugin
 - [ItemInventoryPlugin](../ItemInventoryPlugin/) plugin (for `AWorldItem` — the core interaction framework works without it)
 
