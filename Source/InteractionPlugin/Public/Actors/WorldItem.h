@@ -6,6 +6,7 @@
 #include "Types/CGFItemTypes.h"
 #include "WorldItem.generated.h"
 
+class UStaticMesh;
 class UStaticMeshComponent;
 class UInteractableComponent;
 class UItemDatabaseSubsystem;
@@ -46,6 +47,11 @@ public:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "WorldItem")
 	TObjectPtr<UInteractableComponent> InteractableComponent;
+
+	/** Placeholder mesh shown until (or instead of) the definition's WorldDisplay mesh — a
+	 *  definition without a world mesh must still produce a findable pickup. */
+	UPROPERTY()
+	TObjectPtr<UStaticMesh> FallbackMesh;
 
 protected:
 	virtual void BeginPlay() override;

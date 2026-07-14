@@ -7,8 +7,10 @@
 #include "Interfaces/CGFInventoryInterface.h"
 #include "Tags/CGFGameplayTags.h"
 #include "Engine/AssetManager.h"
+#include "Engine/StaticMesh.h"
 #include "Components/StaticMeshComponent.h"
 #include "Net/UnrealNetwork.h"
+#include "UObject/ConstructorHelpers.h"
 
 AWorldItem::AWorldItem()
 {
@@ -24,6 +26,15 @@ AWorldItem::AWorldItem()
 	MeshComponent->SetGenerateOverlapEvents(true);
 	MeshComponent->SetSimulatePhysics(false);
 	MeshComponent->SetVisibility(false);
+
+	// Placeholder shown until (or instead of) the definition's WorldDisplay mesh: items whose
+	// definition ships no world mesh were spawning as INVISIBLE pickups — present, interactable,
+	// impossible to find.
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> CubeMesh(TEXT("/Engine/BasicShapes/Cube.Cube"));
+	if (CubeMesh.Succeeded())
+	{
+		FallbackMesh = CubeMesh.Object;
+	}
 
 	InteractableComponent = CreateDefaultSubobject<UInteractableComponent>(TEXT("InteractableComponent"));
 }
@@ -78,6 +89,18 @@ void AWorldItem::InitializeFromItem(const FItemInstance& Item)
 	InteractableComponent->InteractionOptions.Add(PickupOption);
 	InteractableComponent->Enable();
 
+	// Show the placeholder immediately and unhide the ACTOR — ResetForPool hides at the actor
+	// level, and only OnMeshLoaded cleared it, so items whose definition has no WorldDisplay
+	// mesh (or whose load was still in flight) stayed invisible: present and interactable but
+	// impossible to find. The async load below swaps in the real mesh when there is one.
+	if (FallbackMesh)
+	{
+		MeshComponent->SetStaticMesh(FallbackMesh);
+		MeshComponent->SetWorldScale3D(FVector(0.25f));
+	}
+	SetActorHiddenInGame(false);
+	MeshComponent->SetVisibility(true);
+
 	// Async load mesh from WorldDisplay fragment
 	UItemFragment_WorldDisplay* DisplayFrag = Def->FindFragment<UItemFragment_WorldDisplay>();
 	if (DisplayFrag && !DisplayFrag->WorldMesh.IsNull())
@@ -87,11 +110,6 @@ void AWorldItem::InitializeFromItem(const FItemInstance& Item)
 			DisplayFrag->WorldMesh.ToSoftObjectPath(),
 			FStreamableDelegate::CreateUObject(this, &AWorldItem::OnMeshLoaded)
 		);
-	}
-	else
-	{
-		// No mesh to load — just make visible
-		MeshComponent->SetVisibility(true);
 	}
 
 	// Enable collision for overlap detection (no physics — items stay where spawned)
