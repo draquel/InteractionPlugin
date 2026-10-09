@@ -97,6 +97,7 @@ void AWorldItem::InitializeFromItem(const FItemInstance& Item)
 	{
 		MeshComponent->SetStaticMesh(FallbackMesh);
 		MeshComponent->SetWorldScale3D(FVector(0.25f));
+		MeshComponent->SetRelativeRotation(FRotator::ZeroRotator);
 	}
 	SetActorHiddenInGame(false);
 	MeshComponent->SetVisibility(true);
@@ -153,6 +154,8 @@ void AWorldItem::OnMeshLoaded()
 	}
 
 	MeshComponent->SetWorldScale3D(DisplayFrag->WorldScale);
+	// The lying pose: a mesh authored upright (a sword, blade +Z) rests flat on the ground.
+	MeshComponent->SetRelativeRotation(DisplayFrag->WorldRotation);
 	SetActorHiddenInGame(false);
 	MeshComponent->SetVisibility(true);
 }
