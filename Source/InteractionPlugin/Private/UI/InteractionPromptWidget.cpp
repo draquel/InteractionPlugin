@@ -49,7 +49,14 @@ void UInteractionPromptWidget::BuildWidgetTree()
 	UOverlay* KeyOverlay = WidgetTree->ConstructWidget<UOverlay>(UOverlay::StaticClass(), TEXT("KeyOverlay"));
 
 	UImage* KeyBg = WidgetTree->ConstructWidget<UImage>(UImage::StaticClass(), TEXT("KeyBgImage"));
-	KeyBg->SetBrush(KeyIconBrush);
+	// An unset brush draws a WHITE box, which hid the white key letter. Without an authored frame, draw a dark one.
+	FSlateBrush KeyFrame = KeyIconBrush;
+	if (!KeyFrame.GetResourceObject())
+	{
+		KeyFrame.TintColor = FSlateColor(FLinearColor(0.16f, 0.16f, 0.2f, 1.0f));
+		KeyFrame.ImageSize = FVector2D(28.0f, 28.0f);
+	}
+	KeyBg->SetBrush(KeyFrame);
 	UOverlaySlot* KeyBgSlot = KeyOverlay->AddChildToOverlay(KeyBg);
 	if (KeyBgSlot)
 	{
@@ -113,8 +120,14 @@ void UInteractionPromptWidget::ShowPromptForActor(AActor* InteractableActor)
 		return;
 	}
 
-	const TArray<FInteractionOption>& Options = Interactable->InteractionOptions;
-	if (Options.Num() > 0 && ActionLabel)
+	// Options for THIS player (the interactable may tailor them, e.g. a torch needs a flame to light).
+	const TArray<FInteractionOption> Options = Interactable->GetInteractionOptions(GetOwningPlayerPawn());
+	if (Options.Num() == 0)
+	{
+		HidePrompt();
+		return;
+	}
+	if (ActionLabel)
 	{
 		const FInteractionOption& FirstOption = Options[0];
 		if (!FirstOption.DisplayText.IsEmpty())

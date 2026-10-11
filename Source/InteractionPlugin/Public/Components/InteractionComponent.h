@@ -137,6 +137,13 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Interaction|Events")
 	FOnChanneledInteractionProgress OnChanneledProgress;
 
+	/**
+	 * Re-announce the current target (OnInteractableFound) so prompts rebuild their text. Call when the interactor's
+	 * own state changes what the target offers -- e.g. it lit or put out the torch it carries.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Interaction")
+	void RefreshCurrentTarget();
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -159,6 +166,19 @@ private:
 
 	UFUNCTION()
 	void HandleControllerChanged(APawn* Pawn, AController* OldController, AController* NewController);
+
+	/**
+	 * Make Target the current best target: unhook the previous target's options-changed event, hook the new one's,
+	 * and broadcast lost / found. Null clears the target.
+	 */
+	void SetBestTarget(AActor* Target);
+
+	/** The current target's options changed (its text, its enabled state): re-announce it so prompts refresh. */
+	UFUNCTION()
+	void HandleTargetOptionsChanged(UInteractableComponent* Interactable);
+
+	/** The interactable component whose OnOptionsChanged is hooked (the current target's). */
+	TWeakObjectPtr<UInteractableComponent> HookedTargetInteractable;
 
 	// -----------------------------------------------------------------------
 	// Channeled interaction state
