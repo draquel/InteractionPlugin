@@ -25,6 +25,12 @@ TickDetection() — fires every DetectionTickRate seconds:
 
 **Detection only runs on the local client.** The server never runs detection — it only validates interaction requests when they arrive via RPC.
 
+The detection timer starts and stops with local control, not with BeginPlay. The component binds the owning pawn's
+`ReceiveControllerChangedDelegate` and re-evaluates `IsLocallyControlled()` at BeginPlay and on every possession
+change. A respawned pawn is spawned (BeginPlay) before the game mode possesses it; gating only at BeginPlay would
+leave it with no detection, so `TryInteract` would have no target. Losing local control clears the nearby list
+and broadcasts `OnInteractableLost` for the current target.
+
 ### Scoring Algorithm
 
 Each candidate is scored by a weighted combination:

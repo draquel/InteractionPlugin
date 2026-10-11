@@ -17,24 +17,62 @@ void UInteractionComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// Detection only runs on the locally controlled client
-	APawn* Pawn = Cast<APawn>(GetOwner());
-	if (Pawn && Pawn->IsLocallyControlled() && DetectionStrategy)
+	// Detection only runs on the locally controlled client. The pawn may not be possessed yet (respawns are
+	// spawned first, possessed after), so follow controller changes instead of deciding once here.
+	if (APawn* Pawn = Cast<APawn>(GetOwner()))
 	{
-		GetWorld()->GetTimerManager().SetTimer(
-			DetectionTimerHandle, this, &UInteractionComponent::TickDetection,
-			DetectionTickRate, true);
-
-		// Enable tick for channeled interaction updates
-		PrimaryComponentTick.SetTickFunctionEnable(true);
-
+		Pawn->ReceiveControllerChangedDelegate.AddDynamic(this, &UInteractionComponent::HandleControllerChanged);
 	}
+	UpdateDetectionActive();
 }
 
 void UInteractionComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	if (APawn* Pawn = Cast<APawn>(GetOwner()))
+	{
+		Pawn->ReceiveControllerChangedDelegate.RemoveDynamic(this, &UInteractionComponent::HandleControllerChanged);
+	}
 	GetWorld()->GetTimerManager().ClearTimer(DetectionTimerHandle);
 	Super::EndPlay(EndPlayReason);
+}
+
+void UInteractionComponent::HandleControllerChanged(APawn* Pawn, AController* OldController, AController* NewController)
+{
+	UpdateDetectionActive();
+}
+
+void UInteractionComponent::UpdateDetectionActive()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+	const APawn* Pawn = Cast<APawn>(GetOwner());
+	const bool bWantDetection = Pawn && Pawn->IsLocallyControlled() && DetectionStrategy;
+	FTimerManager& Timers = World->GetTimerManager();
+	const bool bDetecting = Timers.IsTimerActive(DetectionTimerHandle);
+
+	if (bWantDetection && !bDetecting)
+	{
+		Timers.SetTimer(DetectionTimerHandle, this, &UInteractionComponent::TickDetection, DetectionTickRate, true);
+		// Enable tick for channeled interaction updates
+		PrimaryComponentTick.SetTickFunctionEnable(true);
+	}
+	else if (!bWantDetection && bDetecting)
+	{
+		Timers.ClearTimer(DetectionTimerHandle);
+		NearbyInteractables.Reset();
+		if (AActor* Previous = CurrentBestTarget.Get())
+		{
+			CurrentBestTarget.Reset();
+			OnInteractableLost.Broadcast(Previous);
+		}
+		if (ChanneledState != EChanneledState::Channeling)
+		{
+			PrimaryComponentTick.SetTickFunctionEnable(false);
+		}
+	}
 }
 
 void UInteractionComponent::TickComponent(float DeltaTime, ELevelTick TickType,

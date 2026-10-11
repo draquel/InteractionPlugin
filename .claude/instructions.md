@@ -82,6 +82,9 @@ InteractionPlugin/
 1. **Detection is client-side, interaction is server-side.** The server never runs detection; every
    interaction request is re-validated on the server (actor valid, implements the interface, in range with
    10% tolerance, `CanInteract`) before `Interact` executes. Channeled timers are server-owned.
+   Detection runs exactly while the owning pawn is locally controlled, re-checked on every controller
+   change: a respawned pawn runs BeginPlay before it is possessed, so a BeginPlay-only check leaves it
+   blind (no target, E does nothing) for the rest of the session.
 2. **Never `LoadSynchronous` a world mesh in gameplay code.** Async-load through the streamable manager; the
    fallback mesh covers the gap.
 3. **Options are data, logic is the handler.** Prompt text and hold rules live in `InteractionOptions`;
