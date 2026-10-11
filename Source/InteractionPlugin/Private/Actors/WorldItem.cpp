@@ -9,6 +9,8 @@
 #include "Engine/AssetManager.h"
 #include "Engine/StaticMesh.h"
 #include "Components/StaticMeshComponent.h"
+#include "Subsystems/WorldItemPoolSubsystem.h"
+#include "Engine/World.h"
 #include "Net/UnrealNetwork.h"
 #include "UObject/ConstructorHelpers.h"
 
@@ -158,6 +160,40 @@ void AWorldItem::OnMeshLoaded()
 	MeshComponent->SetRelativeRotation(DisplayFrag->WorldRotation);
 	SetActorHiddenInGame(false);
 	MeshComponent->SetVisibility(true);
+
+	// The real mesh's bounds differ from the placeholder's: settle again so it lies on the ground, not in or over it.
+	if (bSnapToGround)
+	{
+		SnapToGround();
+	}
+}
+
+bool AWorldItem::SnapToGround()
+{
+	UWorld* World = GetWorld();
+	if (!World || !HasAuthority() || !MeshComponent)
+	{
+		return false;
+	}
+
+	// Start just above the item so a drop in a low room never lands on the ceiling's far side; search a few metres
+	// down (drops spawn near a pawn's centre or a creature's body, well above the floor).
+	constexpr float TraceUp = 50.0f;
+	constexpr float TraceDown = 500.0f;
+	const FVector Location = GetActorLocation();
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(WorldItemSnapToGround), false, this);
+	FHitResult Hit;
+	if (!World->LineTraceSingleByObjectType(Hit, Location + FVector(0.0f, 0.0f, TraceUp), Location - FVector(0.0f, 0.0f, TraceDown),
+		FCollisionObjectQueryParams(ECC_WorldStatic), Params))
+	{
+		return false;
+	}
+
+	MeshComponent->UpdateBounds();
+	const FBoxSphereBounds& Bounds = MeshComponent->Bounds;
+	const float PivotAboveBottom = Location.Z - (Bounds.Origin.Z - Bounds.BoxExtent.Z);
+	SetActorLocation(FVector(Location.X, Location.Y, Hit.ImpactPoint.Z + PivotAboveBottom + 1.0f));
+	return true;
 }
 
 void AWorldItem::ResetForPool()
@@ -218,8 +254,17 @@ EInteractionResult AWorldItem::OnPickupInteraction(AActor* Interactor, FGameplay
 	EInventoryOperationResult AddResult = Inventory->TryAddItem(ItemInstance);
 	if (AddResult == EInventoryOperationResult::Success)
 	{
-		// Return to pool — the pool subsystem will handle this
-		ResetForPool();
+		// Hand the actor back to the pool. Only resetting it left it counted as active until its despawn timer
+		// (300 s), so heavy looting could exhaust the pool and later drops were lost.
+		UWorldItemPoolSubsystem* Pool = GetWorld() ? GetWorld()->GetSubsystem<UWorldItemPoolSubsystem>() : nullptr;
+		if (Pool)
+		{
+			Pool->ReturnWorldItem(this);
+		}
+		else
+		{
+			ResetForPool();
+		}
 		return EInteractionResult::Success;
 	}
 

@@ -19,7 +19,17 @@ TArray<FInteractionOption> UInteractableComponent::GetInteractionOptions(AActor*
 	{
 		return TArray<FInteractionOption>();
 	}
-	return InteractionOptions;
+	TArray<FInteractionOption> Options = InteractionOptions;
+	if (OptionsModifier)
+	{
+		OptionsModifier(Interactor, Options);
+	}
+	return Options;
+}
+
+void UInteractableComponent::NotifyOptionsChanged()
+{
+	OnOptionsChanged.Broadcast(this);
 }
 
 bool UInteractableComponent::CanInteract(AActor* Interactor, const FInteractionContext& Context) const

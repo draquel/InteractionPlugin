@@ -9,6 +9,7 @@
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnInteractableStatusChanged, bool, bEnabled);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnInteractionTriggered, AActor*, Interactor, FGameplayTag, InteractionType);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnInteractionOptionsChanged, UInteractableComponent*, Interactable);
 
 /**
  * Makes the owning actor interactable by the interaction system.
@@ -61,6 +62,13 @@ public:
 	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Interactable")
 	bool IsEnabled() const { return bIsEnabled; }
 
+	/**
+	 * Tell listeners the options (or their text) changed -- e.g. a torch was lit. An interactor that has this as its
+	 * current target refreshes its prompt. Call on every machine that shows prompts.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Interactable")
+	void NotifyOptionsChanged();
+
 	// -----------------------------------------------------------------------
 	// Events
 	// -----------------------------------------------------------------------
@@ -71,12 +79,22 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Interactable|Events")
 	FOnInteractionTriggered OnInteractionTriggered;
 
+	/** Fired by NotifyOptionsChanged(). */
+	UPROPERTY(BlueprintAssignable, Category = "Interactable|Events")
+	FOnInteractionOptionsChanged OnOptionsChanged;
+
 	// -----------------------------------------------------------------------
 	// Interaction handler — set by owning code (e.g. AWorldItem)
 	// -----------------------------------------------------------------------
 
 	/** Optional C++ callback invoked when Interact() succeeds. Set by the owning actor. */
 	TFunction<EInteractionResult(AActor* Interactor, FGameplayTag InteractionType)> InteractionHandler;
+
+	/**
+	 * Optional C++ hook that tailors the options to one interactor (e.g. "Light torch" only for someone carrying a
+	 * flame). Applied by GetInteractionOptions() to a copy of InteractionOptions. Set by the owning actor.
+	 */
+	TFunction<void(AActor* Interactor, TArray<FInteractionOption>& InOutOptions)> OptionsModifier;
 
 protected:
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;

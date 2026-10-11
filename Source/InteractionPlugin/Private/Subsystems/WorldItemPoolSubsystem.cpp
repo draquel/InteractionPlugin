@@ -94,6 +94,11 @@ AWorldItem* UWorldItemPoolSubsystem::SpawnWorldItem(const FItemInstance& Item, c
 
 	WorldItem->SetActorLocationAndRotation(Location, Rotation);
 	WorldItem->InitializeFromItem(Item);
+	// Drops spawn at a pawn's centre or a creature's body: settle onto the ground under them.
+	if (WorldItem->bSnapToGround)
+	{
+		WorldItem->SnapToGround();
+	}
 	return WorldItem;
 }
 

@@ -34,6 +34,19 @@ public:
 	/** Reset state for return to pool */
 	void ResetForPool();
 
+	/**
+	 * Rest the item on the surface below it: trace down a short way and move the actor so the mesh's bounds sit on
+	 * the hit. Authority only (the location replicates). Runs at spawn and again once the real mesh has loaded,
+	 * because its bounds differ from the placeholder's.
+	 * @return True if a surface was found and the item moved onto it
+	 */
+	UFUNCTION(BlueprintCallable, Category = "WorldItem")
+	bool SnapToGround();
+
+	/** Settle onto the ground automatically at spawn and after the mesh loads (drops used to hover ~1 m up). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "WorldItem")
+	bool bSnapToGround = true;
+
 	/** The item this actor represents */
 	UPROPERTY(BlueprintReadOnly, Replicated, Category = "WorldItem")
 	FItemInstance ItemInstance;

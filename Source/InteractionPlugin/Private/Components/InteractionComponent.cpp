@@ -32,7 +32,16 @@ void UInteractionComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		Pawn->ReceiveControllerChangedDelegate.RemoveDynamic(this, &UInteractionComponent::HandleControllerChanged);
 	}
-	GetWorld()->GetTimerManager().ClearTimer(DetectionTimerHandle);
+	if (UInteractableComponent* Hooked = HookedTargetInteractable.Get())
+	{
+		Hooked->OnOptionsChanged.RemoveDynamic(this, &UInteractionComponent::HandleTargetOptionsChanged);
+	}
+	HookedTargetInteractable.Reset();
+	// The world can already be gone when an orphaned component ends play (test harnesses tearing down a world).
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(DetectionTimerHandle);
+	}
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -63,11 +72,7 @@ void UInteractionComponent::UpdateDetectionActive()
 	{
 		Timers.ClearTimer(DetectionTimerHandle);
 		NearbyInteractables.Reset();
-		if (AActor* Previous = CurrentBestTarget.Get())
-		{
-			CurrentBestTarget.Reset();
-			OnInteractableLost.Broadcast(Previous);
-		}
+		SetBestTarget(nullptr);
 		if (ChanneledState != EChanneledState::Channeling)
 		{
 			PrimaryComponentTick.SetTickFunctionEnable(false);
@@ -131,20 +136,57 @@ void UInteractionComponent::TickDetection()
 	}
 
 	// 4. Fire events on target change
-	AActor* PreviousTarget = CurrentBestTarget.Get();
-	if (BestTarget != PreviousTarget)
+	if (BestTarget != CurrentBestTarget.Get())
 	{
-		if (PreviousTarget)
-		{
-			OnInteractableLost.Broadcast(PreviousTarget);
-		}
+		SetBestTarget(BestTarget);
+	}
+}
 
-		CurrentBestTarget = BestTarget;
+void UInteractionComponent::SetBestTarget(AActor* Target)
+{
+	AActor* PreviousTarget = CurrentBestTarget.Get();
+	if (UInteractableComponent* Hooked = HookedTargetInteractable.Get())
+	{
+		Hooked->OnOptionsChanged.RemoveDynamic(this, &UInteractionComponent::HandleTargetOptionsChanged);
+	}
+	HookedTargetInteractable.Reset();
 
-		if (BestTarget)
+	if (PreviousTarget && PreviousTarget != Target)
+	{
+		OnInteractableLost.Broadcast(PreviousTarget);
+	}
+
+	CurrentBestTarget = Target;
+
+	if (Target)
+	{
+		// Prompt text can depend on the target's state (a lit vs. dark torch): follow it while it is the target.
+		if (UInteractableComponent* Interactable = Target->FindComponentByClass<UInteractableComponent>())
 		{
-			OnInteractableFound.Broadcast(BestTarget);
+			Interactable->OnOptionsChanged.AddUniqueDynamic(this, &UInteractionComponent::HandleTargetOptionsChanged);
+			HookedTargetInteractable = Interactable;
 		}
+		if (Target != PreviousTarget)
+		{
+			OnInteractableFound.Broadcast(Target);
+		}
+	}
+}
+
+void UInteractionComponent::HandleTargetOptionsChanged(UInteractableComponent* Interactable)
+{
+	AActor* Target = CurrentBestTarget.Get();
+	if (Target && Interactable && Interactable->GetOwner() == Target)
+	{
+		OnInteractableFound.Broadcast(Target);
+	}
+}
+
+void UInteractionComponent::RefreshCurrentTarget()
+{
+	if (AActor* Target = CurrentBestTarget.Get())
+	{
+		OnInteractableFound.Broadcast(Target);
 	}
 }
 

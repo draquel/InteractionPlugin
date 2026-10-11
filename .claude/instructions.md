@@ -93,6 +93,18 @@ InteractionPlugin/
 4. **Interactable actors that keep state replicate it themselves** (door state, chest opened, container
    searched) and `Disable()` their component when they are spent so the prompt dies on every machine.
 5. **New interaction kinds are new tags** (`Interaction.Type.*` in CommonGameFramework), never new enum values.
+6. **Every interactable needs a simple collision shape.** `USphereOverlapDetection` queries simple shapes only, so a
+   mesh exported without simple collision is invisible to detection (no prompt, E does nothing). Give such actors
+   their own query-only box (the dungeon wall torch and container do). `vox.Interact detect` and the
+   `VoxelWorlds.POI.InteractionDetection` test go through detection; plain `vox.Interact` does not.
+7. **Per-player prompt text uses `OptionsModifier`; state changes call `NotifyOptionsChanged()`.** The prompt reads
+   `GetInteractionOptions(LocalPawn)`, so a native `OptionsModifier` can tailor text to the interactor (a dark torch
+   reads "Light torch" only to someone carrying a flame). When an interactable's options or text change, call
+   `NotifyOptionsChanged()` on every machine: the interaction component re-announces its current target and the
+   prompt refreshes. An interactor whose own state changes what targets offer calls `RefreshCurrentTarget()`.
+8. **World items rest on the ground and go back to the pool.** `SnapToGround()` runs at spawn and after the real mesh
+   loads; pickup returns the actor through `UWorldItemPoolSubsystem::ReturnWorldItem` (resetting it alone left it
+   counted as active until its despawn timer and could exhaust the pool).
 
 ## Build.cs Dependencies
 
