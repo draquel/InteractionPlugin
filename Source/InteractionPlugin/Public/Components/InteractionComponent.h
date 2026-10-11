@@ -7,6 +7,8 @@
 #include "Types/CGFInteractionTypes.h"
 #include "InteractionComponent.generated.h"
 
+class AController;
+class APawn;
 class UInteractableComponent;
 class UInteractionDetectionStrategy;
 
@@ -147,6 +149,16 @@ private:
 
 	void TickDetection();
 	FTimerHandle DetectionTimerHandle;
+
+	/**
+	 * Run detection exactly while the owning pawn is locally controlled. Checked at BeginPlay AND on every
+	 * controller change: a respawned pawn is spawned (BeginPlay) before the game mode possesses it, so a
+	 * BeginPlay-only check left every pawn after the first without detection — no prompt, nothing to interact with.
+	 */
+	void UpdateDetectionActive();
+
+	UFUNCTION()
+	void HandleControllerChanged(APawn* Pawn, AController* OldController, AController* NewController);
 
 	// -----------------------------------------------------------------------
 	// Channeled interaction state
