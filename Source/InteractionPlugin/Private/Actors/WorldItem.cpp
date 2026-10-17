@@ -66,6 +66,12 @@ void AWorldItem::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifeti
 void AWorldItem::InitializeFromItem(const FItemInstance& Item)
 {
 	ItemInstance = Item;
+	if (bHasGravityCenter)
+	{
+		// The pool has just stood the actor upright on local up (UWorldItemPoolSubsystem::SpawnWorldItem): the frame the
+		// resting poses below are applied in.
+		UprightRotation = GetActorQuat();
+	}
 
 	UItemDatabaseSubsystem* DB = GetItemDatabase();
 	if (!DB)
@@ -99,7 +105,7 @@ void AWorldItem::InitializeFromItem(const FItemInstance& Item)
 	{
 		MeshComponent->SetStaticMesh(FallbackMesh);
 		MeshComponent->SetWorldScale3D(FVector(0.25f));
-		MeshComponent->SetRelativeRotation(FRotator::ZeroRotator);
+		ApplyRestingPose(FRotator::ZeroRotator);
 	}
 	SetActorHiddenInGame(false);
 	MeshComponent->SetVisibility(true);
@@ -157,7 +163,7 @@ void AWorldItem::OnMeshLoaded()
 
 	MeshComponent->SetWorldScale3D(DisplayFrag->WorldScale);
 	// The lying pose: a mesh authored upright (a sword, blade +Z) rests flat on the ground.
-	MeshComponent->SetRelativeRotation(DisplayFrag->WorldRotation);
+	ApplyRestingPose(DisplayFrag->WorldRotation);
 	SetActorHiddenInGame(false);
 	MeshComponent->SetVisibility(true);
 
@@ -165,6 +171,22 @@ void AWorldItem::OnMeshLoaded()
 	if (bSnapToGround)
 	{
 		SnapToGround();
+	}
+}
+
+void AWorldItem::ApplyRestingPose(const FRotator& Pose)
+{
+	if (!MeshComponent)
+	{
+		return;
+	}
+	if (bHasGravityCenter)
+	{
+		MeshComponent->SetWorldRotation(UprightRotation * Pose.Quaternion());
+	}
+	else
+	{
+		MeshComponent->SetRelativeRotation(Pose);
 	}
 }
 
@@ -183,6 +205,26 @@ bool AWorldItem::SnapToGround()
 	const FVector Location = GetActorLocation();
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(WorldItemSnapToGround), false, this);
 	FHitResult Hit;
+	if (bHasGravityCenter)
+	{
+		// Along local down from the gravity centre; the mesh's lowest corner along local up rests on the hit.
+		const FVector Up = (Location - GravityCenter).GetSafeNormal();
+		if (!World->LineTraceSingleByObjectType(Hit, Location + Up * TraceUp, Location - Up * TraceDown, FCollisionObjectQueryParams(ECC_WorldStatic), Params))
+		{
+			return false;
+		}
+		const FBox LocalBox = MeshComponent->CalcLocalBounds().GetBox();
+		const FTransform& MeshTransform = MeshComponent->GetComponentTransform();
+		double Lowest = TNumericLimits<double>::Max();
+		for (int32 Corner = 0; Corner < 8; ++Corner)
+		{
+			const FVector LocalCorner((Corner & 1) ? LocalBox.Max.X : LocalBox.Min.X, (Corner & 2) ? LocalBox.Max.Y : LocalBox.Min.Y,
+				(Corner & 4) ? LocalBox.Max.Z : LocalBox.Min.Z);
+			Lowest = FMath::Min(Lowest, FVector::DotProduct(MeshTransform.TransformPosition(LocalCorner) - Location, Up));
+		}
+		SetActorLocation(Hit.ImpactPoint + Up * (-Lowest + 1.0));
+		return true;
+	}
 	if (!World->LineTraceSingleByObjectType(Hit, Location + FVector(0.0f, 0.0f, TraceUp), Location - FVector(0.0f, 0.0f, TraceDown),
 		FCollisionObjectQueryParams(ECC_WorldStatic), Params))
 	{

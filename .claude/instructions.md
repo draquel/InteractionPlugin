@@ -79,6 +79,11 @@ InteractionPlugin/
 - Pooled items wait hidden, without collision or physics, at `ParkingLocation` (default (0, 0, -100,000), far under a
   flat world's ground). `SetParkingLocation` moves the spot and every waiting item; game code calls it for a world whose
   ground passes through the default (VoxelCharacterPlugin's game mode parks them at a planet's centre).
+- `SetGravityCenter` / `ClearGravityCenter` (a planet; the same game mode sets it): spawned items stand upright on the
+  direction from it (the requested heading kept), `AWorldItem::SnapToGround` traces along local down and rests the
+  mesh's lowest corner on the hit, and `AWorldItem::ApplyRestingPose` turns the placeholder's or the WorldDisplay
+  fragment's pose relative to that upright frame. The mesh is the actor's root, so never `SetRelativeRotation` it
+  directly: that is the world rotation. Without a centre everything is the old world-Z behaviour.
 
 ## Rules
 
