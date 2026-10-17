@@ -94,7 +94,22 @@ AWorldItem* UWorldItemPoolSubsystem::SpawnWorldItem(const FItemInstance& Item, c
 		return nullptr;
 	}
 
-	WorldItem->SetActorLocationAndRotation(Location, Rotation);
+	WorldItem->SetGravityCenter(bHasGravityCenter, GravityCenter);
+	if (bHasGravityCenter)
+	{
+		// Upright on the local up from the gravity centre, the requested rotation's heading kept.
+		const FVector Up = (Location - GravityCenter).GetSafeNormal();
+		FVector Forward = Rotation.Vector() - Up * FVector::DotProduct(Rotation.Vector(), Up);
+		if (Forward.IsNearlyZero())
+		{
+			Forward = FVector::CrossProduct(Up, FMath::Abs(Up.Y) < 0.9 ? FVector::RightVector : FVector::ForwardVector);
+		}
+		WorldItem->SetActorLocationAndRotation(Location, FRotationMatrix::MakeFromXZ(Forward, Up).ToQuat());
+	}
+	else
+	{
+		WorldItem->SetActorLocationAndRotation(Location, Rotation);
+	}
 	WorldItem->InitializeFromItem(Item);
 	// Drops spawn at a pawn's centre or a creature's body: settle onto the ground under them.
 	if (WorldItem->bSnapToGround)
@@ -116,6 +131,18 @@ void UWorldItemPoolSubsystem::ReturnWorldItem(AWorldItem* Item)
 
 	Item->ResetForPool(ParkingLocation);
 	AvailablePool.Add(Item);
+}
+
+void UWorldItemPoolSubsystem::SetGravityCenter(const FVector& Center)
+{
+	bHasGravityCenter = true;
+	GravityCenter = Center;
+	UE_LOG(LogWorldItemPool, Log, TEXT("Gravity centre %s: items stand and snap along the direction from it."), *Center.ToCompactString());
+}
+
+void UWorldItemPoolSubsystem::ClearGravityCenter()
+{
+	bHasGravityCenter = false;
 }
 
 void UWorldItemPoolSubsystem::SetParkingLocation(const FVector& NewLocation)

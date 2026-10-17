@@ -53,6 +53,14 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "WorldItem")
 	bool bSnapToGround = true;
 
+	/**
+	 * Snap along the direction from a gravity centre instead of world Z (a planet; the pool passes its own,
+	 * UWorldItemPoolSubsystem::SetGravityCenter).
+	 * @param bEnabled Use the centre
+	 * @param Center The gravity centre
+	 */
+	void SetGravityCenter(bool bEnabled, const FVector& Center) { bHasGravityCenter = bEnabled; GravityCenter = Center; }
+
 	/** The item this actor represents */
 	UPROPERTY(BlueprintReadOnly, Replicated, Category = "WorldItem")
 	FItemInstance ItemInstance;
@@ -63,6 +71,10 @@ public:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "WorldItem")
 	TObjectPtr<UStaticMeshComponent> MeshComponent;
+
+	/** SnapToGround's gravity centre (SetGravityCenter). */
+	bool bHasGravityCenter = false;
+	FVector GravityCenter = FVector::ZeroVector;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "WorldItem")
 	TObjectPtr<UInteractableComponent> InteractableComponent;

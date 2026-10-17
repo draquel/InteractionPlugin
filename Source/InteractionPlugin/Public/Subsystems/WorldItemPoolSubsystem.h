@@ -91,6 +91,25 @@ public:
 	UFUNCTION(BlueprintPure, Category = "WorldItemPool")
 	FVector GetParkingLocation() const { return ParkingLocation; }
 
+	/**
+	 * Give spawned items a gravity centre (a planet: VoxelWorlds SPHERICAL_PLANET_REQUIREMENTS.md SP-F7, spherical Phase 4):
+	 * they then stand upright on, and snap to the ground along, the direction from it instead of world Z. Game code sets
+	 * it with the parking spot.
+	 * @param Center The gravity centre
+	 */
+	UFUNCTION(BlueprintCallable, Category = "WorldItemPool")
+	void SetGravityCenter(const FVector& Center);
+
+	/** Back to world Z for items spawned from now on. */
+	UFUNCTION(BlueprintCallable, Category = "WorldItemPool")
+	void ClearGravityCenter();
+
+	UFUNCTION(BlueprintPure, Category = "WorldItemPool")
+	bool HasGravityCenter() const { return bHasGravityCenter; }
+
+	UFUNCTION(BlueprintPure, Category = "WorldItemPool")
+	FVector GetGravityCenter() const { return GravityCenter; }
+
 protected:
 	virtual void OnWorldBeginPlay(UWorld& InWorld) override;
 	virtual void Deinitialize() override;
@@ -104,6 +123,10 @@ private:
 
 	/** Spawn a single pooled actor and reset it */
 	AWorldItem* SpawnPooledActor();
+
+	/** The gravity centre spawned items use (SetGravityCenter). */
+	bool bHasGravityCenter = false;
+	FVector GravityCenter = FVector::ZeroVector;
 
 	/** Pre-warm timer for batched spawning */
 	FTimerHandle PreWarmTimerHandle;
