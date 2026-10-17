@@ -76,6 +76,9 @@ InteractionPlugin/
 - `UWorldItemPoolSubsystem::SpawnWorldItem(Item, Location, Rotation)` / `ReturnWorldItem` / `ReturnAllWorldItems`;
   pre-warmed, capped, despawn timeout. Pool only runtime drops (loot bursts, inventory drops); placed items
   are regular actors.
+- Pooled items wait hidden, without collision or physics, at `ParkingLocation` (default (0, 0, -100,000), far under a
+  flat world's ground). `SetParkingLocation` moves the spot and every waiting item; game code calls it for a world whose
+  ground passes through the default (VoxelCharacterPlugin's game mode parks them at a planet's centre).
 
 ## Rules
 

@@ -3,6 +3,8 @@
 #include "TimerManager.h"
 #include "Engine/World.h"
 
+DEFINE_LOG_CATEGORY_STATIC(LogWorldItemPool, Log, All);
+
 void UWorldItemPoolSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 {
 	Super::OnWorldBeginPlay(InWorld);
@@ -112,8 +114,21 @@ void UWorldItemPoolSubsystem::ReturnWorldItem(AWorldItem* Item)
 	ClearDespawnTimer(Item);
 	ActiveItems.Remove(Item);
 
-	Item->ResetForPool();
+	Item->ResetForPool(ParkingLocation);
 	AvailablePool.Add(Item);
+}
+
+void UWorldItemPoolSubsystem::SetParkingLocation(const FVector& NewLocation)
+{
+	ParkingLocation = NewLocation;
+	for (AWorldItem* Item : AvailablePool)
+	{
+		if (IsValid(Item))
+		{
+			Item->SetActorLocation(ParkingLocation);
+		}
+	}
+	UE_LOG(LogWorldItemPool, Log, TEXT("Parking at %s (%d waiting item(s) moved)."), *ParkingLocation.ToCompactString(), AvailablePool.Num());
 }
 
 void UWorldItemPoolSubsystem::ReturnAllWorldItems()
@@ -141,11 +156,11 @@ AWorldItem* UWorldItemPoolSubsystem::SpawnPooledActor()
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
 	AWorldItem* Item = World->SpawnActor<AWorldItem>(AWorldItem::StaticClass(),
-		FVector(0.0f, 0.0f, -100000.0f), FRotator::ZeroRotator, SpawnParams);
+		ParkingLocation, FRotator::ZeroRotator, SpawnParams);
 
 	if (Item)
 	{
-		Item->ResetForPool();
+		Item->ResetForPool(ParkingLocation);
 	}
 
 	return Item;

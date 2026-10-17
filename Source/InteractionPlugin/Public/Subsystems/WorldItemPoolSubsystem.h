@@ -41,6 +41,14 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Pool")
 	int32 PreWarmBatchSize = 10;
 
+	/**
+	 * Where pooled items wait while hidden (no collision, no physics). The default is far under a flat world's ground; a
+	 * world whose ground passes there (a planet's south pole, VoxelWorlds SPHERICAL_PLANET_REQUIREMENTS.md SP-F5) moves
+	 * it with SetParkingLocation.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Pool")
+	FVector ParkingLocation = FVector(0.0, 0.0, -100000.0);
+
 	// -----------------------------------------------------------------------
 	// API
 	// -----------------------------------------------------------------------
@@ -70,6 +78,18 @@ public:
 
 	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "WorldItemPool")
 	int32 GetTotalCount() const { return AvailablePool.Num() + ActiveItems.Num(); }
+
+	/**
+	 * Move the parking spot (ParkingLocation) and every item waiting in the pool to it; returned items park there from
+	 * now on. Game code calls it for worlds whose ground passes through the default spot.
+	 * @param NewLocation Where pooled items wait
+	 */
+	UFUNCTION(BlueprintCallable, Category = "WorldItemPool")
+	void SetParkingLocation(const FVector& NewLocation);
+
+	/** @return Where pooled items wait */
+	UFUNCTION(BlueprintPure, Category = "WorldItemPool")
+	FVector GetParkingLocation() const { return ParkingLocation; }
 
 protected:
 	virtual void OnWorldBeginPlay(UWorld& InWorld) override;

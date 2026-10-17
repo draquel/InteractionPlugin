@@ -31,8 +31,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "WorldItem")
 	void InitializeFromItem(const FItemInstance& Item);
 
-	/** Reset state for return to pool */
-	void ResetForPool();
+	/** Where a pooled item waits unless its pool says otherwise (UWorldItemPoolSubsystem::ParkingLocation) */
+	static const FVector DefaultParkingLocation;
+
+	/**
+	 * Reset state for return to pool: hidden, no collision, no physics, parked at ParkingLocation.
+	 * @param ParkingLocation Where to wait (the pool's parking spot)
+	 */
+	void ResetForPool(const FVector& ParkingLocation = DefaultParkingLocation);
 
 	/**
 	 * Rest the item on the surface below it: trace down a short way and move the actor so the mesh's bounds sit on
