@@ -196,7 +196,9 @@ bool AWorldItem::SnapToGround()
 	return true;
 }
 
-void AWorldItem::ResetForPool()
+const FVector AWorldItem::DefaultParkingLocation(0.0, 0.0, -100000.0);
+
+void AWorldItem::ResetForPool(const FVector& ParkingLocation)
 {
 	// Cancel any pending async load
 	if (MeshLoadHandle.IsValid())
@@ -217,7 +219,7 @@ void AWorldItem::ResetForPool()
 	ItemInstance = FItemInstance();
 
 	DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
-	SetActorLocation(FVector(0.0f, 0.0f, -100000.0f));
+	SetActorLocation(ParkingLocation);
 }
 
 // ===========================================================================
