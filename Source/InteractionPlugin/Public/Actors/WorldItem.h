@@ -61,6 +61,15 @@ public:
 	 */
 	void SetGravityCenter(bool bEnabled, const FVector& Center) { bHasGravityCenter = bEnabled; GravityCenter = Center; }
 
+	/**
+	 * Turn the item into a resting pose (the placeholder's zero, or the WorldDisplay fragment's lying rotation). The mesh is
+	 * the root, so its relative rotation is the actor's: with a gravity centre the pose is applied on top of the upright
+	 * rotation the item was spawned with (InitializeFromItem keeps it), so it lies on the planet's ground; without one it
+	 * is the world rotation, as before.
+	 * @param Pose The pose, relative to the upright frame (world axes without a gravity centre)
+	 */
+	void ApplyRestingPose(const FRotator& Pose);
+
 	/** The item this actor represents */
 	UPROPERTY(BlueprintReadOnly, Replicated, Category = "WorldItem")
 	FItemInstance ItemInstance;
@@ -75,6 +84,9 @@ public:
 	/** SnapToGround's gravity centre (SetGravityCenter). */
 	bool bHasGravityCenter = false;
 	FVector GravityCenter = FVector::ZeroVector;
+
+	/** With a gravity centre: the upright rotation the item was initialised with, the frame of ApplyRestingPose. */
+	FQuat UprightRotation = FQuat::Identity;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "WorldItem")
 	TObjectPtr<UInteractableComponent> InteractableComponent;

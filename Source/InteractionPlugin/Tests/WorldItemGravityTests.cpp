@@ -15,7 +15,9 @@
 // ---------------------------------------------------------------------------
 // World items on a planet (VoxelWorlds SPHERICAL_PLANET_REQUIREMENTS.md SP-F7; spherical Phase 4, WM-SY16). With the
 // pool's gravity centre an item dropped over a sphere stands upright on the radial and snaps along it, its lowest point
-// on the ground; without one it snaps along world -Z as before.
+// on the ground, and its resting pose (the WorldDisplay fragment's lying rotation) turns it relative to that upright frame
+// (the mesh is the root, so a relative rotation used to be the world rotation and tipped every planet drop over); without
+// a centre it snaps along world -Z and the pose is the world rotation, as before.
 // ---------------------------------------------------------------------------
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FWorldItemSnapAlongGravityTest,
 	"InteractionPlugin.WorldItem.SnapAlongGravity",
@@ -84,6 +86,17 @@ bool FWorldItemSnapAlongGravityTest::RunTest(const FString& Parameters)
 			TestTrue(TEXT("Upright on the radial"), Tilt < 0.01);
 			TestTrue(TEXT("Snapped along the radial (on the radial line)"), FVector::CrossProduct(Up, Direction).Size() < 1.0e-6);
 			TestTrue(TEXT("Its lowest point a uu over the ground"), bGround && FMath::Abs(Gap - 1.0) < 0.5);
+
+			// A lying pose (on its side): relative to the upright frame, so the forward stays on the tangent plane and the
+			// item's own up lies across the radial.
+			const FVector UprightForward = Item->GetActorForwardVector();
+			Item->ApplyRestingPose(FRotator(0.0, 0.0, 90.0));
+			AddInfo(FString::Printf(TEXT("  posed on its side: up . radial %.4f, forward kept %.4f"),
+				FVector::DotProduct(Item->GetActorUpVector(), Up), FVector::DotProduct(Item->GetActorForwardVector(), UprightForward)));
+			TestTrue(TEXT("The pose is relative to the upright frame (on its side across the radial)"),
+				FMath::Abs(FVector::DotProduct(Item->GetActorUpVector(), Up)) < 1.0e-4);
+			TestTrue(TEXT("The pose keeps the upright heading (a roll about the forward axis)"),
+				FVector::DotProduct(Item->GetActorForwardVector(), UprightForward) > 1.0 - 1.0e-6);
 			Pool->ReturnWorldItem(Item);
 		}
 
@@ -98,6 +111,8 @@ bool FWorldItemSnapAlongGravityTest::RunTest(const FString& Parameters)
 			AddInfo(FString::Printf(TEXT("Over the floor: bounds bottom at Z %.2f, rotation %s"), Bottom, *Item->GetActorRotation().ToCompactString()));
 			TestTrue(TEXT("Plane: the requested rotation kept"), Item->GetActorRotation().Equals(FRotator(0.0, 30.0, 0.0), 1.0e-3));
 			TestTrue(TEXT("Plane: the bounds' bottom a uu over the floor"), FMath::Abs(Bottom - 1.0) < 0.5);
+			Item->ApplyRestingPose(FRotator(0.0, 0.0, 90.0));
+			TestTrue(TEXT("Plane: the pose is the world rotation, as before"), Item->GetActorRotation().Equals(FRotator(0.0, 0.0, 90.0), 1.0e-3));
 		}
 		Floor->Destroy();
 	}

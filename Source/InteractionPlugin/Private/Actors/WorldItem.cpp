@@ -66,6 +66,12 @@ void AWorldItem::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifeti
 void AWorldItem::InitializeFromItem(const FItemInstance& Item)
 {
 	ItemInstance = Item;
+	if (bHasGravityCenter)
+	{
+		// The pool has just stood the actor upright on local up (UWorldItemPoolSubsystem::SpawnWorldItem): the frame the
+		// resting poses below are applied in.
+		UprightRotation = GetActorQuat();
+	}
 
 	UItemDatabaseSubsystem* DB = GetItemDatabase();
 	if (!DB)
@@ -99,7 +105,7 @@ void AWorldItem::InitializeFromItem(const FItemInstance& Item)
 	{
 		MeshComponent->SetStaticMesh(FallbackMesh);
 		MeshComponent->SetWorldScale3D(FVector(0.25f));
-		MeshComponent->SetRelativeRotation(FRotator::ZeroRotator);
+		ApplyRestingPose(FRotator::ZeroRotator);
 	}
 	SetActorHiddenInGame(false);
 	MeshComponent->SetVisibility(true);
@@ -157,7 +163,7 @@ void AWorldItem::OnMeshLoaded()
 
 	MeshComponent->SetWorldScale3D(DisplayFrag->WorldScale);
 	// The lying pose: a mesh authored upright (a sword, blade +Z) rests flat on the ground.
-	MeshComponent->SetRelativeRotation(DisplayFrag->WorldRotation);
+	ApplyRestingPose(DisplayFrag->WorldRotation);
 	SetActorHiddenInGame(false);
 	MeshComponent->SetVisibility(true);
 
@@ -165,6 +171,22 @@ void AWorldItem::OnMeshLoaded()
 	if (bSnapToGround)
 	{
 		SnapToGround();
+	}
+}
+
+void AWorldItem::ApplyRestingPose(const FRotator& Pose)
+{
+	if (!MeshComponent)
+	{
+		return;
+	}
+	if (bHasGravityCenter)
+	{
+		MeshComponent->SetWorldRotation(UprightRotation * Pose.Quaternion());
+	}
+	else
+	{
+		MeshComponent->SetRelativeRotation(Pose);
 	}
 }
 
