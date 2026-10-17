@@ -200,6 +200,16 @@ void AWorldItem::OnMeshLoaded()
 
 **Never** call `LoadSynchronous` in gameplay code paths. A hitch from loading one mesh is bad; loading 50 items from a loot drop synchronously would freeze the game.
 
+### On a Planet (VoxelWorlds spherical Phase 4, SP-F7)
+
+With the pool's gravity centre (`UWorldItemPoolSubsystem::SetGravityCenter`, set by VoxelCharacterPlugin's game mode on a
+planet) a spawned item stands upright on the direction from the centre, its requested heading kept;
+`AWorldItem::SnapToGround` traces along local down and rests the mesh's lowest corner (from its local bounds) 1 uu over
+the hit; and the resting pose (the placeholder's zero, the WorldDisplay fragment's `WorldRotation`) is applied on top of
+that upright rotation by `AWorldItem::ApplyRestingPose`. The mesh component is the root, so its relative rotation is the
+world rotation: setting the pose directly tipped every planet drop over (found in the Phase 4 exit check). Without a
+centre all of this is the old world-Z behaviour. Test: `InteractionPlugin.WorldItem.SnapAlongGravity`.
+
 ---
 
 ## Object Pooling
