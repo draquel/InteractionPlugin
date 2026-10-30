@@ -28,8 +28,8 @@ public:
 	// Configuration
 	// -----------------------------------------------------------------------
 
-	/** Whether this interactable is active and visible to detection */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Replicated, Category = "Interactable|Config")
+	/** Whether this interactable is active and visible to detection. Replicated: set it on the server (SetEnabled, Enable, Disable). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Replicated, Category = "Interactable|Config")
 	bool bIsEnabled = true;
 
 	/** Available interaction options for this interactable */
@@ -58,6 +58,10 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Interactable")
 	void Disable();
+
+	/** Enable or disable on the authority only (the replicated flag reaches clients); a no-op elsewhere. */
+	UFUNCTION(BlueprintCallable, Category = "Interaction|Interactable")
+	void SetEnabled(bool bEnabled);
 
 	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Interactable")
 	bool IsEnabled() const { return bIsEnabled; }
