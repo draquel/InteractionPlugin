@@ -99,3 +99,19 @@ void UInteractableComponent::Disable()
 		OnStatusChanged.Broadcast(false);
 	}
 }
+
+void UInteractableComponent::SetEnabled(bool bEnabled)
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+	{
+		return;
+	}
+	if (bEnabled)
+	{
+		Enable();
+	}
+	else
+	{
+		Disable();
+	}
+}
