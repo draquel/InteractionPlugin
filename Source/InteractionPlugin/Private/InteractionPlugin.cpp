@@ -1,5 +1,7 @@
 #include "InteractionPlugin.h"
 
+DEFINE_LOG_CATEGORY(LogIAP);
+
 #define LOCTEXT_NAMESPACE "FInteractionPluginModule"
 
 void FInteractionPluginModule::StartupModule()

@@ -1,9 +1,8 @@
 #include "Subsystems/WorldItemPoolSubsystem.h"
+#include "InteractionPlugin.h"
 #include "Actors/WorldItem.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
-
-DEFINE_LOG_CATEGORY_STATIC(LogWorldItemPool, Log, All);
 
 void UWorldItemPoolSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 {
@@ -137,7 +136,7 @@ void UWorldItemPoolSubsystem::SetGravityCenter(const FVector& Center)
 {
 	bHasGravityCenter = true;
 	GravityCenter = Center;
-	UE_LOG(LogWorldItemPool, Log, TEXT("Gravity centre %s: items stand and snap along the direction from it."), *Center.ToCompactString());
+	UE_LOG(LogIAP, Log, TEXT("Gravity centre %s: items stand and snap along the direction from it."), *Center.ToCompactString());
 }
 
 void UWorldItemPoolSubsystem::ClearGravityCenter()
@@ -155,7 +154,7 @@ void UWorldItemPoolSubsystem::SetParkingLocation(const FVector& NewLocation)
 			Item->SetActorLocation(ParkingLocation);
 		}
 	}
-	UE_LOG(LogWorldItemPool, Log, TEXT("Parking at %s (%d waiting item(s) moved)."), *ParkingLocation.ToCompactString(), AvailablePool.Num());
+	UE_LOG(LogIAP, Log, TEXT("Parking at %s (%d waiting item(s) moved)."), *ParkingLocation.ToCompactString(), AvailablePool.Num());
 }
 
 void UWorldItemPoolSubsystem::ReturnAllWorldItems()
