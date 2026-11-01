@@ -19,7 +19,7 @@
 // given a context, no play begun; collision queries work there.
 // ---------------------------------------------------------------------------
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FInteractionFlowLineTraceTest,
-	"InteractionPlugin.Flow.LineTraceAndInteract",
+	"Interaction.Flow.LineTraceAndInteract",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FInteractionFlowLineTraceTest::RunTest(const FString& Parameters)
