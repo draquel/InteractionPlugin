@@ -20,7 +20,7 @@
 // a centre it snaps along world -Z and the pose is the world rotation, as before.
 // ---------------------------------------------------------------------------
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FWorldItemSnapAlongGravityTest,
-	"InteractionPlugin.WorldItem.SnapAlongGravity",
+	"Interaction.WorldItem.SnapAlongGravity",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FWorldItemSnapAlongGravityTest::RunTest(const FString& Parameters)
