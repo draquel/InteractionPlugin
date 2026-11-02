@@ -67,9 +67,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Interaction|Channeling")
 	float CancelMoveThreshold = 50.0f;
 
-	/** Cancel channeled interaction if the player takes damage */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Interaction|Channeling")
-	bool bCancelOnDamage = true;
+	/**
+	 * How long a client holds a finished channel at full progress for the server's result before it gives up and
+	 * cancels (the request or the answer was lost: the owner is not this connection's, say)
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Interaction|Channeling", meta = (ClampMin = "0"))
+	float ChannelResultTimeout = 2.0f;
 
 	// -----------------------------------------------------------------------
 	// State (read-only from Blueprint)
@@ -99,9 +102,17 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Interaction")
 	EInteractionResult TryInteractWith(AActor* TargetActor, FGameplayTag InteractionType);
 
-	/** Start a channeled interaction */
+	/**
+	 * Start a channeled interaction. The server runs the channel and completes it (the interactable's Interact runs there
+	 * only); the owning client runs a copy for OnChanneledProgress and finishes when the server's result arrives (G92).
+	 * @param Target          The interactable actor
+	 * @param InteractionType One of the options it offers (invalid = its first)
+	 * @param Duration        Seconds to channel; an option with bRequiresHold is never shorter than its HoldDuration
+	 * @return InProgress when the channel started; Failed (already channeling, no such option, no duration), OutOfRange
+	 *         or NotAllowed (the interactable refuses) otherwise
+	 */
 	UFUNCTION(BlueprintCallable, Category = "Interaction")
-	void StartChanneledInteraction(AActor* Target, FGameplayTag InteractionType, float Duration);
+	EInteractionResult StartChanneledInteraction(AActor* Target, FGameplayTag InteractionType, float Duration);
 
 	/** Cancel an in-progress channeled interaction */
 	UFUNCTION(BlueprintCallable, Category = "Interaction")
@@ -191,7 +202,22 @@ private:
 	FVector ChanneledStartLocation = FVector::ZeroVector;
 
 	void TickChanneling(float DeltaTime);
+	/** Authority: run the interactable's Interact, broadcast, and tell a remote owner the result. */
 	void CompleteChanneledInteraction();
+	/** Enter the Channeling state (both machines) and make sure the component ticks. */
+	void BeginChannel(AActor* Target, FGameplayTag InteractionType, float Duration);
+	/** Back to Idle with no target and no progress. */
+	void EndChannel();
+
+	/**
+	 * The channel length for an option: the requested Duration, never shorter than the option's HoldDuration when it
+	 * requires a hold, so a client cannot shorten a hold. Both machines use it.
+	 * @return The duration, or 0 when the target does not offer the option (or there is no duration)
+	 */
+	float ResolveChannelDuration(AActor* TargetActor, FGameplayTag InteractionType, float Duration) const;
+
+	/** The owner is a pawn or controller driven from another machine: results go to it by ClientRPC_InteractionResult. */
+	bool IsRemotelyControlled() const;
 
 	// -----------------------------------------------------------------------
 	// Server RPCs
@@ -217,7 +243,13 @@ private:
 	// Validation helpers (shared client/server)
 	// -----------------------------------------------------------------------
 
-	bool ValidateInteraction(AActor* TargetActor, FGameplayTag InteractionType, float RangeTolerance = 1.0f) const;
+	/**
+	 * The one interaction predicate (D-CR16): the client's pre-check (RangeTolerance 1) and both server RPCs (1.1, for
+	 * latency) run it. The target is valid, within range, has an enabled interactable, and that interactable's
+	 * CanInteract allows the interactor.
+	 * @return Success; Failed (no target or interactable, or it is disabled), OutOfRange, NotAllowed
+	 */
+	EInteractionResult CheckInteraction(AActor* TargetActor, FGameplayTag InteractionType, float RangeTolerance = 1.0f) const;
 	UInteractableComponent* GetInteractable(AActor* Actor) const;
 
 	/** Build interaction context for the given target */
