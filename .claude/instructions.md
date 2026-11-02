@@ -47,9 +47,11 @@ InteractionPlugin/
 
 - `InteractionRange` (1,000 uu), `DetectionTickRate` (0.1 s: detection is a timer, never per frame, and runs on the
   locally controlled pawn only), `DetectionStrategy` (instanced), scoring weights (`DistanceWeight`, `AngleWeight`,
-  `PriorityWeight`), `CancelMoveThreshold` (50 uu). `bCancelOnDamage` is declared but nothing reads it.
+  `PriorityWeight`), `CancelMoveThreshold` (50 uu), `ChannelResultTimeout` (2 s: how long a client holds a finished
+  channel for the server's result). No damage cancel: the unread `bCancelOnDamage` was removed (G92).
 - `TryInteract(Type)` on the current best target; `TryInteractWith(Target, Type)`;
-  `StartChanneledInteraction(Target, Type, Duration)` / `CancelChanneledInteraction()`; `RefreshCurrentTarget()`.
+  `StartChanneledInteraction(Target, Type, Duration)` (returns `InProgress` or the refusal) /
+  `CancelChanneledInteraction()`; `RefreshCurrentTarget()`. `CheckInteraction` is the one predicate both machines run.
 - Delegates: `OnInteractableFound` / `OnInteractableLost` (drive the prompt), `OnInteractionStarted`,
   `OnInteractionCompleted` / `OnInteractionFailed`, `OnChanneledProgress`.
 - Server RPCs `ServerRPC_RequestInteract`, `ServerRPC_StartChanneledInteraction`,
@@ -94,9 +96,11 @@ InteractionPlugin/
    `CanInteract`) before `Interact` runs. Detection runs exactly while the owning pawn is locally controlled, re-checked
    on every controller change: a respawned pawn runs BeginPlay before it is possessed, so a BeginPlay-only check leaves
    it blind (no target, E does nothing) for the rest of the session.
-2. **Channeled interactions run on both sides.** The server runs the channel from `ServerRPC_StartChanneledInteraction`
-   and calls `Interact` when it completes; the owning client runs its own copy for `OnChanneledProgress` and, today,
-   also calls `Interact` on its side when the time is up. Handlers that change state must check authority.
+2. **Channeled interactions complete on the server only (G92).** The server runs the channel from
+   `ServerRPC_StartChanneledInteraction` (after `CheckInteraction`, `CanInteract` included, and with the option's
+   `HoldDuration` as the floor) and calls `Interact` when it completes, answering a remote owner with
+   `ClientRPC_InteractionResult`. The owning client's copy only drives `OnChanneledProgress`: it holds at full progress
+   until that answer ends it, and gives up after `ChannelResultTimeout`. Never call `Interact` from client code.
 3. **Never `LoadSynchronous` a world mesh in gameplay code.** Async-load through the streamable manager; the fallback
    mesh covers the gap.
 4. **Options are data, logic is the handler.** Prompt text and hold rules live in `InteractionOptions`; what happens
@@ -129,7 +133,9 @@ PrivateDependencyModuleNames: ItemInventoryPlugin (AWorldItem), UMG, Slate, Slat
 
 - Log category `LogIAP` (`InteractionPlugin.h`).
 - Tests in `Source/InteractionPlugin/Tests/`: `Interaction.Flow.LineTraceAndInteract` (the line-trace strategy detects
-  an interactable, `TryInteractWith` runs its handler, a disabled or out-of-range one fails) and `Interaction.WorldItem.SnapAlongGravity` (a world item resting along a
-  planet's gravity). VoxelWorldPOI's `VoxelWorlds.POI.InteractionDetection.*` covers detection of self-shaped
-  interactables. Not covered yet: the server-side checks, the scoring function, the channeled flow, the pool's
-  return-and-reuse cycle.
+  an interactable, `TryInteractWith` runs its handler, a disabled or out-of-range one fails), `Interaction.Channeled.*`
+  (simulated server/client in one world with `CGFTesting::FRPCCall`: the server alone runs the handler, at the option's
+  hold whatever the client asked; the server's refusals, the client's wait and timeout, cancels on both sides) and
+  `Interaction.WorldItem.SnapAlongGravity` (a world item resting along a planet's gravity). VoxelWorldPOI's
+  `VoxelWorlds.POI.InteractionDetection.*` covers detection of self-shaped interactables. Not covered yet: the scoring
+  function, the pool's return-and-reuse cycle.

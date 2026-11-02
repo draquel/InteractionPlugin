@@ -1,4 +1,5 @@
 #include "Components/InteractionComponent.h"
+#include "InteractionPlugin.h"
 #include "Components/InteractableComponent.h"
 #include "Detection/InteractionDetectionStrategy.h"
 #include "GameFramework/PlayerController.h"
@@ -253,7 +254,7 @@ EInteractionResult UInteractionComponent::TryInteract(FGameplayTag InteractionTy
 
 EInteractionResult UInteractionComponent::TryInteractWith(AActor* TargetActor, FGameplayTag InteractionType)
 {
-	if (!ValidateInteraction(TargetActor, InteractionType))
+	if (CheckInteraction(TargetActor, InteractionType) != EInteractionResult::Success)
 	{
 		return EInteractionResult::Failed;
 	}
@@ -293,33 +294,36 @@ EInteractionResult UInteractionComponent::TryInteractWith(AActor* TargetActor, F
 // Channeled Interaction
 // ===========================================================================
 
-void UInteractionComponent::StartChanneledInteraction(AActor* Target, FGameplayTag InteractionType, float Duration)
+EInteractionResult UInteractionComponent::StartChanneledInteraction(AActor* Target, FGameplayTag InteractionType, float Duration)
 {
 	if (ChanneledState == EChanneledState::Channeling)
 	{
-		return; // Already channeling
+		return EInteractionResult::Failed; // Already channeling
 	}
 
-	if (!ValidateInteraction(Target, InteractionType) || Duration <= 0.0f)
+	const EInteractionResult Check = CheckInteraction(Target, InteractionType);
+	if (Check != EInteractionResult::Success)
 	{
-		return;
+		return Check;
+	}
+
+	const float ChannelDuration = ResolveChannelDuration(Target, InteractionType, Duration);
+	if (ChannelDuration <= 0.0f)
+	{
+		return EInteractionResult::Failed;
 	}
 
 	if (!GetOwner()->HasAuthority())
 	{
+		// The server checks again and runs the authoritative channel; this copy only shows progress.
 		ServerRPC_StartChanneledInteraction(Target, InteractionType, Duration);
 	}
 
-	ChanneledTarget = Target;
-	ChanneledInteractionType = InteractionType;
-	ChanneledDuration = Duration;
-	ChanneledElapsed = 0.0f;
-	ChanneledProgress = 0.0f;
-	ChanneledStartLocation = GetOwner()->GetActorLocation();
-	ChanneledState = EChanneledState::Channeling;
+	BeginChannel(Target, InteractionType, ChannelDuration);
 
 	FInteractionContext Context = MakeContext(Target, InteractionType);
 	OnInteractionStarted.Broadcast(Context);
+	return EInteractionResult::InProgress;
 }
 
 void UInteractionComponent::CancelChanneledInteraction()
@@ -336,11 +340,17 @@ void UInteractionComponent::CancelChanneledInteraction()
 
 	ChanneledState = EChanneledState::Cancelled;
 
-	FInteractionContext Context = MakeContext(ChanneledTarget.Get(), ChanneledInteractionType);
+	AActor* Target = ChanneledTarget.Get();
+	FInteractionContext Context = MakeContext(Target, ChanneledInteractionType);
 	OnInteractionFailed.Broadcast(Context, EInteractionResult::Cancelled);
 
-	ChanneledState = EChanneledState::Idle;
-	ChanneledTarget = nullptr;
+	// The server ended a remote player's channel (moved away, target gone): its client stops showing progress.
+	if (GetOwner()->HasAuthority() && IsRemotelyControlled())
+	{
+		ClientRPC_InteractionResult(Target, ChanneledInteractionType, EInteractionResult::Cancelled);
+	}
+
+	EndChannel();
 }
 
 void UInteractionComponent::TickChanneling(float DeltaTime)
@@ -375,28 +385,52 @@ void UInteractionComponent::TickChanneling(float DeltaTime)
 		return;
 	}
 
+	const bool bWasFull = ChanneledElapsed >= ChanneledDuration;
 	ChanneledElapsed += DeltaTime;
 	ChanneledProgress = FMath::Clamp(ChanneledElapsed / ChanneledDuration, 0.0f, 1.0f);
-	OnChanneledProgress.Broadcast(ChanneledProgress);
+	if (!bWasFull)
+	{
+		OnChanneledProgress.Broadcast(ChanneledProgress);
+	}
 
-	if (ChanneledElapsed >= ChanneledDuration)
+	if (ChanneledElapsed < ChanneledDuration)
+	{
+		return;
+	}
+
+	if (GetOwner()->HasAuthority())
 	{
 		CompleteChanneledInteraction();
+	}
+	else if (ChanneledElapsed >= ChanneledDuration + ChannelResultTimeout)
+	{
+		// A client never completes: it holds at full progress for the server's result (G92). None came.
+		UE_LOG(LogIAP, Warning, TEXT("Channeled interaction with %s: no result from the server after %.1f s; cancelled."),
+			*GetNameSafe(ChanneledTarget.Get()), ChannelResultTimeout);
+		CancelChanneledInteraction();
 	}
 }
 
 void UInteractionComponent::CompleteChanneledInteraction()
 {
+	// Interact runs on the authority only: a client's channel is a progress display (G92).
+	if (!GetOwner()->HasAuthority())
+	{
+		return;
+	}
+
 	AActor* Target = ChanneledTarget.Get();
 	UInteractableComponent* Interactable = Target ? GetInteractable(Target) : nullptr;
+	const FGameplayTag InteractionType = ChanneledInteractionType;
 
 	ChanneledState = EChanneledState::Completed;
 
-	FInteractionContext Context = MakeContext(Target, ChanneledInteractionType);
+	FInteractionContext Context = MakeContext(Target, InteractionType);
 
+	EInteractionResult Result = EInteractionResult::Failed;
 	if (Interactable)
 	{
-		EInteractionResult Result = Interactable->Interact(GetOwner(), ChanneledInteractionType);
+		Result = Interactable->Interact(GetOwner(), InteractionType);
 		if (Result == EInteractionResult::Success)
 		{
 			OnInteractionCompleted.Broadcast(Context, Result);
@@ -407,9 +441,74 @@ void UInteractionComponent::CompleteChanneledInteraction()
 		}
 	}
 
+	if (IsRemotelyControlled())
+	{
+		ClientRPC_InteractionResult(Target, InteractionType, Result);
+	}
+
+	EndChannel();
+}
+
+void UInteractionComponent::BeginChannel(AActor* Target, FGameplayTag InteractionType, float Duration)
+{
+	ChanneledTarget = Target;
+	ChanneledInteractionType = InteractionType;
+	ChanneledDuration = Duration;
+	ChanneledElapsed = 0.0f;
+	ChanneledProgress = 0.0f;
+	ChanneledStartLocation = GetOwner()->GetActorLocation();
+	ChanneledState = EChanneledState::Channeling;
+	// Detection enables the tick on the locally controlled pawn only; a server channel for a remote player needs it too.
+	PrimaryComponentTick.SetTickFunctionEnable(true);
+}
+
+void UInteractionComponent::EndChannel()
+{
 	ChanneledState = EChanneledState::Idle;
 	ChanneledTarget = nullptr;
+	ChanneledElapsed = 0.0f;
 	ChanneledProgress = 0.0f;
+	// The tick stays on while detection runs (UpdateDetectionActive); otherwise it was on for this channel only.
+	const UWorld* World = GetWorld();
+	if (!World || !World->GetTimerManager().IsTimerActive(DetectionTimerHandle))
+	{
+		PrimaryComponentTick.SetTickFunctionEnable(false);
+	}
+}
+
+float UInteractionComponent::ResolveChannelDuration(AActor* TargetActor, FGameplayTag InteractionType, float Duration) const
+{
+	const UInteractableComponent* Interactable = GetInteractable(TargetActor);
+	if (!Interactable)
+	{
+		return 0.0f;
+	}
+
+	// The option as this interactor sees it (an options modifier may change it); no type means the first, as Interact does.
+	const TArray<FInteractionOption> Options = Interactable->GetInteractionOptions(GetOwner());
+	const FInteractionOption* Option = InteractionType.IsValid()
+		? Options.FindByPredicate([&InteractionType](const FInteractionOption& Candidate) { return Candidate.InteractionType == InteractionType; })
+		: (Options.Num() > 0 ? &Options[0] : nullptr);
+	if (!Option)
+	{
+		return 0.0f;
+	}
+
+	const float HoldFloor = Option->bRequiresHold ? Option->HoldDuration : 0.0f;
+	return FMath::Max(Duration, HoldFloor);
+}
+
+bool UInteractionComponent::IsRemotelyControlled() const
+{
+	if (const APawn* Pawn = Cast<APawn>(GetOwner()))
+	{
+		return Pawn->GetController() && !Pawn->IsLocallyControlled();
+	}
+	if (const AController* Controller = Cast<AController>(GetOwner()))
+	{
+		return !Controller->IsLocalController();
+	}
+	return false;
 }
 
 // ===========================================================================
@@ -419,80 +518,58 @@ void UInteractionComponent::CompleteChanneledInteraction()
 void UInteractionComponent::ServerRPC_RequestInteract_Implementation(AActor* TargetActor,
 	FGameplayTag InteractionType)
 {
-	// 1. Actor validity
-	if (!IsValid(TargetActor))
+	// 1. The client's checks again, with 10% range tolerance for latency
+	const EInteractionResult Check = CheckInteraction(TargetActor, InteractionType, 1.1f);
+	if (Check != EInteractionResult::Success)
 	{
+		ClientRPC_InteractionResult(TargetActor, InteractionType, Check);
 		return;
 	}
 
-	// 2. Range check with 10% tolerance for latency
-	float Distance = FVector::Dist(GetOwner()->GetActorLocation(), TargetActor->GetActorLocation());
-	if (Distance > InteractionRange * 1.1f)
-	{
-		ClientRPC_InteractionResult(TargetActor, InteractionType, EInteractionResult::OutOfRange);
-		return;
-	}
-
-	// 3. Interactable check
+	// 2. Execute
 	UInteractableComponent* Interactable = GetInteractable(TargetActor);
-	if (!Interactable || !Interactable->IsEnabled())
-	{
-		ClientRPC_InteractionResult(TargetActor, InteractionType, EInteractionResult::Failed);
-		return;
-	}
-
-	// 4. Can interact check
-	FInteractionContext Context = MakeContext(TargetActor, InteractionType);
-	if (!Interactable->CanInteract(GetOwner(), Context))
-	{
-		ClientRPC_InteractionResult(TargetActor, InteractionType, EInteractionResult::NotAllowed);
-		return;
-	}
-
-	// 5. Execute
 	EInteractionResult Result = Interactable->Interact(GetOwner(), InteractionType);
 
-	// 6. Notify client
+	// 3. Notify client
 	ClientRPC_InteractionResult(TargetActor, InteractionType, Result);
 }
 
 void UInteractionComponent::ServerRPC_StartChanneledInteraction_Implementation(AActor* Target,
 	FGameplayTag InteractionType, float Duration)
 {
-	if (!IsValid(Target) || Duration <= 0.0f)
+	// A refusal answers, so the client stops the progress it already shows.
+	if (ChanneledState == EChanneledState::Channeling)
 	{
+		ClientRPC_InteractionResult(Target, InteractionType, EInteractionResult::Failed);
 		return;
 	}
 
-	float Distance = FVector::Dist(GetOwner()->GetActorLocation(), Target->GetActorLocation());
-	if (Distance > InteractionRange * 1.1f)
+	// The same checks as the instant path, CanInteract included (G92)
+	const EInteractionResult Check = CheckInteraction(Target, InteractionType, 1.1f);
+	if (Check != EInteractionResult::Success)
 	{
+		ClientRPC_InteractionResult(Target, InteractionType, Check);
 		return;
 	}
 
-	UInteractableComponent* Interactable = GetInteractable(Target);
-	if (!Interactable || !Interactable->IsEnabled())
+	// The option must be offered, and its hold is the server's length, whatever the client asked
+	const float ChannelDuration = ResolveChannelDuration(Target, InteractionType, Duration);
+	if (ChannelDuration <= 0.0f)
 	{
+		ClientRPC_InteractionResult(Target, InteractionType, EInteractionResult::Failed);
 		return;
 	}
 
-	// Server starts its own channeling state machine
-	ChanneledTarget = Target;
-	ChanneledInteractionType = InteractionType;
-	ChanneledDuration = Duration;
-	ChanneledElapsed = 0.0f;
-	ChanneledStartLocation = GetOwner()->GetActorLocation();
-	ChanneledState = EChanneledState::Channeling;
-	PrimaryComponentTick.SetTickFunctionEnable(true);
+	// Server starts its own channeling state machine; it alone completes it
+	BeginChannel(Target, InteractionType, ChannelDuration);
 }
 
 void UInteractionComponent::ServerRPC_CancelChanneledInteraction_Implementation()
 {
+	// The client cancelled and already reported it; no answer.
 	if (ChanneledState == EChanneledState::Channeling)
 	{
-		ChanneledState = EChanneledState::Cancelled;
-		ChanneledState = EChanneledState::Idle;
-		ChanneledTarget = nullptr;
+		EndChannel();
 	}
 }
 
@@ -503,6 +580,18 @@ void UInteractionComponent::ServerRPC_CancelChanneledInteraction_Implementation(
 void UInteractionComponent::ClientRPC_InteractionResult_Implementation(AActor* TargetActor,
 	FGameplayTag InteractionType, EInteractionResult Result)
 {
+	// The server's word ends this client's copy of a channel with that target (completed, refused or cancelled there).
+	const bool bEndsChannel = ChanneledState == EChanneledState::Channeling && ChanneledTarget.Get() == TargetActor;
+	if (bEndsChannel)
+	{
+		EndChannel();
+	}
+	else if (Result == EInteractionResult::Cancelled)
+	{
+		// The client ended this channel itself and has reported it.
+		return;
+	}
+
 	FInteractionContext Context = MakeContext(TargetActor, InteractionType);
 
 	if (Result == EInteractionResult::Success)
@@ -519,28 +608,33 @@ void UInteractionComponent::ClientRPC_InteractionResult_Implementation(AActor* T
 // Validation Helpers
 // ===========================================================================
 
-bool UInteractionComponent::ValidateInteraction(AActor* TargetActor, FGameplayTag InteractionType,
+EInteractionResult UInteractionComponent::CheckInteraction(AActor* TargetActor, FGameplayTag InteractionType,
 	float RangeTolerance) const
 {
 	if (!IsValid(TargetActor) || !GetOwner())
 	{
-		return false;
-	}
-
-	UInteractableComponent* Interactable = GetInteractable(TargetActor);
-	if (!Interactable || !Interactable->IsEnabled())
-	{
-		return false;
+		return EInteractionResult::Failed;
 	}
 
 	float Distance = FVector::Dist(GetOwner()->GetActorLocation(), TargetActor->GetActorLocation());
 	if (Distance > InteractionRange * RangeTolerance)
 	{
-		return false;
+		return EInteractionResult::OutOfRange;
+	}
+
+	UInteractableComponent* Interactable = GetInteractable(TargetActor);
+	if (!Interactable || !Interactable->IsEnabled())
+	{
+		return EInteractionResult::Failed;
 	}
 
 	FInteractionContext Context = MakeContext(TargetActor, InteractionType);
-	return Interactable->CanInteract(GetOwner(), Context);
+	if (!Interactable->CanInteract(GetOwner(), Context))
+	{
+		return EInteractionResult::NotAllowed;
+	}
+
+	return EInteractionResult::Success;
 }
 
 UInteractableComponent* UInteractionComponent::GetInteractable(AActor* Actor) const

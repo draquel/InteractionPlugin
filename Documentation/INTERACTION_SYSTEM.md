@@ -70,7 +70,7 @@ actor; subclasses implement `DetectInteractables(SourceActor, InteractionRange, 
 ```
 Interact input → UInteractionComponent::TryInteract(InteractionType)
     → TryInteractWith(CurrentBestTarget, Type)
-        → ValidateInteraction: target valid, an enabled UInteractableComponent, within InteractionRange, CanInteract
+        → CheckInteraction: target valid, within InteractionRange, an enabled UInteractableComponent, CanInteract
         → client: ServerRPC_RequestInteract(Target, Type), returns InProgress
               server checks again (see Multiplayer), runs Interact, answers with ClientRPC_InteractionResult
               → OnInteractionCompleted (Success) or OnInteractionFailed on the client
@@ -83,24 +83,35 @@ Interact input → UInteractionComponent::TryInteract(InteractionType)
 For interactions that take time (an option with `bRequiresHold` and a `HoldDuration`):
 
 ```
-StartChanneledInteraction(Target, Type, Duration):
-    ValidateInteraction, Duration > 0
-    client: also ServerRPC_StartChanneledInteraction (the server checks range and the interactable, starts its own channel)
-    state Channeling, OnInteractionStarted
+StartChanneledInteraction(Target, Type, Duration) → EInteractionResult:
+    CheckInteraction; the target must offer the option (the first one when Type is empty)
+    length = Duration, never shorter than the option's HoldDuration when it has bRequiresHold (ResolveChannelDuration)
+    client: also ServerRPC_StartChanneledInteraction; the server runs CheckInteraction (with the 1.1 range
+        tolerance, CanInteract included) and ResolveChannelDuration itself and starts its own channel, or answers the
+        refusal with ClientRPC_InteractionResult
+    state Channeling (the tick is turned on), OnInteractionStarted; returns InProgress
 
-Tick while Channeling (TickComponent):
+Tick while Channeling (TickComponent), on both machines:
     cancel when the target is gone or disabled, the owner moved more than CancelMoveThreshold (50 uu)
     from where it started, or the target is beyond 1.1 x InteractionRange
-    progress = elapsed / Duration → OnChanneledProgress
-    at Duration: UInteractableComponent::Interact, OnInteractionCompleted or OnInteractionFailed, back to Idle
+    progress = elapsed / length → OnChanneledProgress
+    at the length:
+        server / standalone: UInteractableComponent::Interact, OnInteractionCompleted or OnInteractionFailed, back to
+            Idle; a remote owner gets the result by ClientRPC_InteractionResult
+        client: hold at full progress until the server's result arrives (it ends the channel and fires
+            OnInteractionCompleted or OnInteractionFailed); after ChannelResultTimeout (2 s) more, cancel
 
-CancelChanneledInteraction(): client also sends ServerRPC_CancelChanneledInteraction; OnInteractionFailed(Cancelled)
+CancelChanneledInteraction(): client also sends ServerRPC_CancelChanneledInteraction; OnInteractionFailed(Cancelled).
+    A cancel on the server (the player moved, the target went away) tells a remote owner with a Cancelled result.
 ```
 
-Both the server and the owning client run the channel: the server's completion is the authoritative `Interact`; the
-client's copy drives `OnChanneledProgress` and, today, also calls `Interact` on the client when its time is up, so
-handlers that change state must check authority. Progress is not replicated. `bCancelOnDamage` is declared on the
-component but nothing reads it.
+`Interact` runs on the server only (G92): the owning client's channel is a progress display that ends with the server's
+answer, so an interaction handler never runs on a client. The length is the server's: a client asking for less than the
+option's hold still waits the hold. Progress is not replicated; each machine counts its own. The component has no
+damage cancel: the old `bCancelOnDamage` flag was never read, and the framework has no damage notification to wire it
+to (damage lives in the game layer's combat component), so it was removed; a game that wants it calls
+`CancelChanneledInteraction` from its own damage event on the server. Tests: `Interaction.Channeled.ServerCompletes` and
+`Interaction.Channeled.Refusals` (simulated server/client in one world).
 
 ---
 
@@ -214,38 +225,31 @@ combat, a door while it animates. Disabling fires `OnInteractableLost` on any pl
 ### Interaction Validation on the Server
 
 ```cpp
+EInteractionResult UInteractionComponent::CheckInteraction(AActor* TargetActor, FGameplayTag InteractionType,
+    float RangeTolerance) const
+{
+    if (!IsValid(TargetActor) || !GetOwner()) return EInteractionResult::Failed;
+    if (Distance > InteractionRange * RangeTolerance) return EInteractionResult::OutOfRange;
+    if (!Interactable || !Interactable->IsEnabled()) return EInteractionResult::Failed;   // FindComponentByClass
+    if (!Interactable->CanInteract(GetOwner(), MakeContext(...))) return EInteractionResult::NotAllowed;
+    return EInteractionResult::Success;
+}
+
 void UInteractionComponent::ServerRPC_RequestInteract_Implementation(AActor* TargetActor, FGameplayTag InteractionType)
 {
-    if (!IsValid(TargetActor)) return;
-
-    // Range, with 10% tolerance for latency
-    const float Distance = FVector::Dist(GetOwner()->GetActorLocation(), TargetActor->GetActorLocation());
-    if (Distance > InteractionRange * 1.1f)
+    const EInteractionResult Check = CheckInteraction(TargetActor, InteractionType, 1.1f);   // 10% for latency
+    if (Check != EInteractionResult::Success)
     {
-        ClientRPC_InteractionResult(TargetActor, InteractionType, EInteractionResult::OutOfRange);
+        ClientRPC_InteractionResult(TargetActor, InteractionType, Check);
         return;
     }
-
-    UInteractableComponent* Interactable = GetInteractable(TargetActor);    // FindComponentByClass
-    if (!Interactable || !Interactable->IsEnabled())
-    {
-        ClientRPC_InteractionResult(TargetActor, InteractionType, EInteractionResult::Failed);
-        return;
-    }
-
-    const FInteractionContext Context = MakeContext(TargetActor, InteractionType);
-    if (!Interactable->CanInteract(GetOwner(), Context))
-    {
-        ClientRPC_InteractionResult(TargetActor, InteractionType, EInteractionResult::NotAllowed);
-        return;
-    }
-
-    ClientRPC_InteractionResult(TargetActor, InteractionType, Interactable->Interact(GetOwner(), InteractionType));
+    ClientRPC_InteractionResult(TargetActor, InteractionType, GetInteractable(TargetActor)->Interact(GetOwner(), InteractionType));
 }
 ```
 
-The client runs the same checks before it sends (`ValidateInteraction`, without the tolerance), so most refusals never
-reach the network; the server repeats them inline (code review decision D-CR16). The 10% range tolerance absorbs the
+`CheckInteraction` is the one predicate (code review decision D-CR16): the client runs it before it sends (without the
+tolerance), so most refusals never reach the network, and both server RPCs, the instant request and the channeled start,
+run it again (G92 added the channeled start's `CanInteract`). The 10% range tolerance absorbs the
 client being slightly ahead of where the server sees it.
 
 ### World Item Replication
