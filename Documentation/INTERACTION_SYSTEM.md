@@ -1,8 +1,13 @@
-# Interaction System — Detailed Design
+# Interaction System
+
+> State as of 2026-11-02 (code review CR5).
 
 ## Overview
 
-This document covers the internal design of the InteractionPlugin: detection strategies, the interaction component lifecycle, the world item actor, object pooling, and channeled interactions. For how this plugin integrates with ItemInventoryPlugin and EquipmentPlugin, see `Plugins/CommonGameFramework/Documentation/ARCHITECTURE.md`.
+The design of InteractionPlugin: detection and scoring, the interaction component's instant and channeled flows, the
+interactable component, the world item actor and its pool, and server validation. How the plugin fits with
+ItemInventoryPlugin and EquipmentPlugin is in `Plugins/CommonGameFramework/Documentation/ARCHITECTURE.md`. Module
+`InteractionPlugin`, log category `LogIAP`.
 
 ---
 
@@ -10,67 +15,51 @@ This document covers the internal design of the InteractionPlugin: detection str
 
 ### Detection Loop
 
-The `UInteractionComponent` does NOT run detection every frame. It uses a configurable timer (default 0.1s) to reduce cost.
+`UInteractionComponent` does not detect every frame. A timer every `DetectionTickRate` (0.1 s) runs `TickDetection()`:
 
 ```
-TickDetection() — fires every DetectionTickRate seconds:
-    1. Ask DetectionStrategy for nearby actors within InteractionRange
-    2. Filter to actors implementing IInteractable
-    3. Filter to actors where CanInteract() returns true
-    4. Score each candidate
-    5. Update NearbyInteractables array
-    6. Determine best target
-    7. If best target changed: fire OnInteractableFound / OnInteractableLost
+1. DetectionStrategy->DetectInteractables(Owner, InteractionRange) → candidate actors
+2. keep actors with an enabled UInteractableComponent whose CanInteract(Owner, Context) is true → NearbyInteractables
+3. score each candidate (ScoreCandidate); the highest is the best target
+4. when the best target changes: OnInteractableLost for the old one, OnInteractableFound for the new one
 ```
 
-**Detection only runs on the local client.** The server never runs detection — it only validates interaction requests when they arrive via RPC.
+The best target's `OnOptionsChanged` is followed while it is the target, so a change of prompt text (a torch lit or put
+out) re-announces it through `OnInteractableFound`.
 
-The detection timer starts and stops with local control, not with BeginPlay. The component binds the owning pawn's
-`ReceiveControllerChangedDelegate` and re-evaluates `IsLocallyControlled()` at BeginPlay and on every possession
-change. A respawned pawn is spawned (BeginPlay) before the game mode possesses it; gating only at BeginPlay would
-leave it with no detection, so `TryInteract` would have no target. Losing local control clears the nearby list
-and broadcasts `OnInteractableLost` for the current target.
+**Detection runs only on the locally controlled pawn.** The server never detects; it checks requests when they arrive.
+The timer starts and stops with local control, not with BeginPlay: the component binds the owning pawn's
+`ReceiveControllerChangedDelegate` and re-evaluates `IsLocallyControlled()` at BeginPlay and on every possession change.
+A respawned pawn is spawned (BeginPlay) before the game mode possesses it; gating only at BeginPlay would leave it with
+no detection, so `TryInteract` would have no target. Losing local control clears the nearby list and broadcasts
+`OnInteractableLost` for the current target.
 
-### Scoring Algorithm
-
-Each candidate is scored by a weighted combination:
+### Scoring
 
 ```
-Score = (DistanceScore * DistanceWeight)
-      + (AngleScore * AngleWeight)
-      + (PriorityScore * PriorityWeight)
+Score = DistanceScore * DistanceWeight + AngleScore * AngleWeight + PriorityScore * PriorityWeight
 
-DistanceScore = 1.0 - (Distance / InteractionRange)      // 0-1, closer = higher
-AngleScore = DotProduct(CameraForward, DirectionToTarget) // -1 to 1, centered = higher
-PriorityScore = InteractionPriority / MaxPriority          // 0-1, from IInteractable
+DistanceScore = 1 - clamp(Distance / InteractionRange, 0, 1)        closer = higher
+AngleScore    = dot(view forward, direction to the target)          -1..1; the camera's view for a player,
+                                                                     else the actor's forward
+PriorityScore = clamp(UInteractableComponent::InteractionPriority / 10, 0, 1)
 
-Default weights: Distance=0.4, Angle=0.4, Priority=0.2
+Default weights: Distance 0.4, Angle 0.4, Priority 0.2
 ```
 
-The scoring function is `BlueprintNativeEvent` — games can override it for custom behavior (e.g., prioritize quest-relevant objects regardless of distance).
+`ScoreCandidate` is a `BlueprintNativeEvent`: a game can override it (prefer quest objects regardless of distance).
 
 ### Detection Strategies
 
-**USphereOverlapDetection:**
-```
-Performs UWorld::OverlapMultiByChannel centered on the source actor.
-Uses a dedicated collision channel or object type (configurable).
-Returns all overlapping actors.
+`UInteractionDetectionStrategy` is an abstract `EditInlineNew` object, instanced on the component and configurable per
+actor; subclasses implement `DetectInteractables(SourceActor, InteractionRange, OutCandidates)`.
 
-Best for: Third-person games, broad-area interaction.
-```
-
-**ULineTraceDetection:**
-```
-Performs a line trace from the camera location along camera forward.
-Range = InteractionRange.
-Uses configurable collision channel.
-Returns the first hit actor (or all hits in multi-trace mode).
-
-Best for: First-person games, precision aiming.
-```
-
-**Custom strategies** subclass `UInteractionDetectionStrategy` and override `DetectInteractables`. The strategy is an `EditInlineNew` instanced object on `UInteractionComponent`, so it's configurable per-actor in the editor.
+- **`USphereOverlapDetection`**: `OverlapMultiByChannel` with a sphere of `InteractionRange` around the source actor on
+  `CollisionChannel` (`ECC_WorldDynamic`); every overlapped actor is a candidate. Overlaps see simple collision only, so
+  an interactable needs a simple shape. Third-person use.
+- **`ULineTraceDetection`**: a trace of `InteractionRange` from the player camera along its view (the actor's location
+  and forward without a player controller) on `CollisionChannel` (`ECC_Visibility`); the first hit, or every hit with
+  `bMultiTrace`. First-person use.
 
 ---
 
@@ -79,52 +68,39 @@ Best for: First-person games, precision aiming.
 ### Instant Interaction
 
 ```
-Player presses Interact input
-    → UInteractionComponent::TryInteract(InteractionType)
-        → Checks CurrentBestTarget is valid
-        → If multiplayer: sends ServerRPC_RequestInteract(TargetActor, InteractionType)
-        → If standalone/server:
-            → Validates range (re-check, target may have moved since detection)
-            → Calls IInteractable::Interact(Interactor, InteractionType) on target
-            → Receives EInteractionResult
-            → Fires OnInteractionCompleted or OnInteractionFailed
+Interact input → UInteractionComponent::TryInteract(InteractionType)
+    → TryInteractWith(CurrentBestTarget, Type)
+        → ValidateInteraction: target valid, an enabled UInteractableComponent, within InteractionRange, CanInteract
+        → client: ServerRPC_RequestInteract(Target, Type), returns InProgress
+              server checks again (see Multiplayer), runs Interact, answers with ClientRPC_InteractionResult
+              → OnInteractionCompleted (Success) or OnInteractionFailed on the client
+        → server / standalone: OnInteractionStarted, UInteractableComponent::Interact(Owner, Type),
+              OnInteractionCompleted or OnInteractionFailed, returns the result
 ```
 
 ### Channeled Interaction
 
-For interactions that take time (opening a chest, picking a lock, looting):
+For interactions that take time (an option with `bRequiresHold` and a `HoldDuration`):
 
 ```
-State Machine:
-    IDLE → CHANNELING → COMPLETED
-                      → CANCELLED
+StartChanneledInteraction(Target, Type, Duration):
+    ValidateInteraction, Duration > 0
+    client: also ServerRPC_StartChanneledInteraction (the server checks range and the interactable, starts its own channel)
+    state Channeling, OnInteractionStarted
 
-StartChanneledInteraction(Target, InteractionType, Duration):
-    → Validates target supports this interaction
-    → Sets state to CHANNELING
-    → Starts timer (server-driven in multiplayer)
-    → Fires OnInteractionStarted
+Tick while Channeling (TickComponent):
+    cancel when the target is gone or disabled, the owner moved more than CancelMoveThreshold (50 uu)
+    from where it started, or the target is beyond 1.1 x InteractionRange
+    progress = elapsed / Duration → OnChanneledProgress
+    at Duration: UInteractableComponent::Interact, OnInteractionCompleted or OnInteractionFailed, back to Idle
 
-Tick (while CHANNELING):
-    → Update progress: CurrentTime / Duration (0.0 → 1.0)
-    → Fire OnChanneledProgress(Progress)
-    → Check cancel conditions:
-        - Player moved beyond CancelMoveThreshold (default 50 units)
-        - Player took damage (if bCancelOnDamage is true)
-        - Target became invalid (destroyed, disabled)
-        - Player pressed cancel input
-    → If any cancel condition met:
-        → Set state to CANCELLED
-        → Fire OnInteractionFailed(Cancelled)
-
-Timer completes:
-    → Call IInteractable::Interact(Interactor, InteractionType)
-    → Set state to COMPLETED
-    → Fire OnInteractionCompleted
-    → Return to IDLE
+CancelChanneledInteraction(): client also sends ServerRPC_CancelChanneledInteraction; OnInteractionFailed(Cancelled)
 ```
 
-**Multiplayer channeling:** The server owns the timer. Client sends `ServerRPC_StartChanneledInteraction`. Server starts the timer, validates cancellation conditions server-side, and replicates progress to the client for UI. This prevents speed hacks where the client claims the channel completed instantly.
+Both the server and the owning client run the channel: the server's completion is the authoritative `Interact`; the
+client's copy drives `OnChanneledProgress` and, today, also calls `Interact` on the client when its time is up, so
+handlers that change state must check authority. Progress is not replicated. `bCancelOnDamage` is declared on the
+component but nothing reads it.
 
 ---
 
@@ -133,82 +109,38 @@ Timer completes:
 ### AWorldItem Lifecycle
 
 ```
-POOLED (inactive) → INITIALIZING → ACTIVE (in world) → PICKUP → POOLED
-                                         ↓
-                                    DESPAWN (timeout) → POOLED
+POOLED (hidden, parked) → InitializeFromItem → ACTIVE (in the world) → picked up      → POOLED
+                                                      └──────────→ despawn timeout → POOLED
 ```
 
-**InitializeFromItem(FItemInstance):**
-1. Store the FItemInstance
-2. Look up UItemDefinition via ItemDatabaseSubsystem
-3. Find UItemFragment_WorldDisplay on the definition
-4. Async load the world mesh → `OnMeshLoaded` callback
-5. Configure InteractableComponent with pickup options
-6. Enable collision and physics
-7. Set actor to visible (after mesh loads)
+**`InitializeFromItem(FItemInstance)`:**
+1. Store the instance (`ItemInstance`, replicated).
+2. Add the "Pick Up <name>" option (`Interaction.Type.Pickup`) to the `UInteractableComponent` and enable it.
+3. Show the fallback cube at a quarter scale at once (items without a world mesh would otherwise be invisible pickups),
+   collision on, physics off.
+4. Look up the definition through `UItemDatabaseSubsystem`; when it has a `UItemFragment_WorldDisplay` mesh, request it
+   asynchronously.
+5. On load (`OnMeshLoaded`): set the mesh, `WorldMaterial` and `WorldScale`, apply `WorldRotation` as the resting pose
+   (`ApplyRestingPose`) and `SnapToGround()`.
 
-**OnPickupInteraction(Interactor, InteractionType):**
-1. Get `UInventoryComponent` from interactor (via `IInventoryOwner`)
-2. Call `InventoryComponent->TryAddItem(ItemInstance)`
-3. If success: return self to object pool
-4. If failure (inventory full): remain in world, optionally show "inventory full" feedback
+**Pickup (`OnPickupInteraction`, the component's handler):** find the interactor's inventory through
+`ICGFInventoryInterface` (else a `UInventoryComponent` on the actor), `TryAddItem(ItemInstance)`; on success return the
+actor through `UWorldItemPoolSubsystem::ReturnWorldItem`. On failure (inventory full) the item stays.
 
-**ResetForPool():**
-1. Set actor to hidden
-2. Disable collision and physics
-3. Clear mesh component
-4. Clear ItemInstance data
-5. Detach from any parent
-6. Move to pool staging location (below world, or origin)
+**`ResetForPool(ParkingLocation)`:** cancel the mesh load, hide, collision and physics off, clear the mesh, disable and
+clear the interactable's options, clear the instance, detach, move to the parking location.
 
-### Mesh Loading
+Never `LoadSynchronous` a world mesh in gameplay code: one mesh is a hitch, a loot burst of fifty is a freeze.
 
-World items use **async loading** exclusively. The pattern:
-
-```cpp
-void AWorldItem::InitializeFromItem(const FItemInstance& Item)
-{
-    ItemInstance = Item;
-    UItemDefinition* Def = GetItemDatabaseSubsystem()->GetDefinition(Item.ItemDefinitionId);
-    UItemFragment_WorldDisplay* DisplayFrag = Def->FindFragment<UItemFragment_WorldDisplay>();
-
-    if (DisplayFrag && !DisplayFrag->WorldMesh.IsNull())
-    {
-        // Start async load
-        FStreamableManager& Manager = UAssetManager::GetStreamableManager();
-        MeshLoadHandle = Manager.RequestAsyncLoad(
-            DisplayFrag->WorldMesh.ToSoftObjectPath(),
-            FStreamableDelegate::CreateUObject(this, &AWorldItem::OnMeshLoaded)
-        );
-    }
-}
-
-void AWorldItem::OnMeshLoaded()
-{
-    UItemDefinition* Def = GetItemDatabaseSubsystem()->GetDefinition(ItemInstance.ItemDefinitionId);
-    UItemFragment_WorldDisplay* DisplayFrag = Def->FindFragment<UItemFragment_WorldDisplay>();
-
-    MeshComponent->SetStaticMesh(DisplayFrag->WorldMesh.Get());
-    if (!DisplayFrag->WorldMaterial.IsNull())
-    {
-        MeshComponent->SetMaterial(0, DisplayFrag->WorldMaterial.Get());
-    }
-    MeshComponent->SetWorldScale3D(DisplayFrag->WorldScale);
-    SetActorHiddenInGame(false);
-}
-```
-
-**Never** call `LoadSynchronous` in gameplay code paths. A hitch from loading one mesh is bad; loading 50 items from a loot drop synchronously would freeze the game.
-
-### On a Planet (VoxelWorlds spherical Phase 4, SP-F7)
+### On a Planet
 
 With the pool's gravity centre (`UWorldItemPoolSubsystem::SetGravityCenter`, set by VoxelCharacterPlugin's game mode on a
 planet) a spawned item stands upright on the direction from the centre, its requested heading kept;
 `AWorldItem::SnapToGround` traces along local down and rests the mesh's lowest corner (from its local bounds) 1 uu over
 the hit; and the resting pose (the placeholder's zero, the WorldDisplay fragment's `WorldRotation`) is applied on top of
 that upright rotation by `AWorldItem::ApplyRestingPose`. The mesh component is the root, so its relative rotation is the
-world rotation: setting the pose directly tipped every planet drop over (found in the Phase 4 exit check). Without a
-centre all of this is the old world-Z behaviour. Test: `InteractionPlugin.WorldItem.SnapAlongGravity`.
+world rotation: setting the pose directly tipped every planet drop over (G22). Without a centre all of this is world-Z.
+Test: `Interaction.WorldItem.SnapAlongGravity`.
 
 ---
 
@@ -216,35 +148,30 @@ centre all of this is the old world-Z behaviour. Test: `InteractionPlugin.WorldI
 
 ### UWorldItemPoolSubsystem
 
-`UWorldSubsystem` that manages a pool of `AWorldItem` actors.
+`UWorldSubsystem`, `Subsystems/WorldItemPoolSubsystem.h`.
 
 ```
 Configuration:
-    InitialPoolSize = 50          (pre-spawned on world begin)
-    MaxPoolSize = 200             (hard cap, prevents unbounded growth)
-    DespawnTimeout = 300.0f       (seconds before uncollected items despawn, 0 = never)
-    bExpandPoolOnDemand = true    (spawn new if pool empty, up to MaxPoolSize)
+    InitialPoolSize = 50          pre-spawned from OnWorldBeginPlay
+    PreWarmBatchSize = 10         actors spawned per pre-warm timer tick
+    MaxPoolSize = 200             cap on pooled + active actors
+    DespawnTimeout = 300 s        an active item returns to the pool after this (0 = never)
+    bExpandPoolOnDemand = true    spawn a new actor when the pool is empty, up to MaxPoolSize
+    ParkingLocation = (0, 0, -100,000)
 
 API:
-    AWorldItem* GetWorldItem()
-        → Returns an inactive item from pool, or spawns new if allowed
-        → Returns nullptr if pool exhausted and expansion disabled/capped
-
-    void ReturnWorldItem(AWorldItem* Item)
-        → Calls ResetForPool() on the item
-        → Returns it to the available pool
-
-    void ReturnAllWorldItems()
-        → Returns every active world item to the pool (level cleanup)
+    AWorldItem* SpawnWorldItem(Item, Location, Rotation)   a pooled actor, placed and initialised
+    AWorldItem* GetWorldItem()                             a pooled actor, or nullptr when exhausted
+    void ReturnWorldItem(AWorldItem*)                      ResetForPool and back to the pool
+    void ReturnAllWorldItems()                             every active item back (level cleanup)
+    SetParkingLocation, SetGravityCenter / ClearGravityCenter
 ```
 
-**Pre-warming:** During `OnWorldBeginPlay`, the subsystem spawns `InitialPoolSize` actors, calls `ResetForPool()` on each, and stores them in a TArray. Spawning is spread across multiple frames if needed (e.g., 10 per frame) to avoid a hitch.
+The despawn timer starts when an item becomes active and is cleared when it returns; a player walking toward an item does
+not reset it.
 
-**Despawn timer:** Active world items that aren't picked up within `DespawnTimeout` are automatically returned to the pool. The timer starts when the item becomes active. Reset the timer if a player comes within interaction range (to avoid despawning items the player is walking toward).
-
-### When NOT to Pool
-
-Items that are placed by level designers (not dropped at runtime) should be regular actors, not pooled. Pooled items are for dynamic runtime spawning: loot drops, inventory drops, loot container populations.
+Items placed by level designers are ordinary actors, not pooled. The pool is for runtime drops: loot bursts and
+inventory drops.
 
 ---
 
@@ -252,82 +179,77 @@ Items that are placed by level designers (not dropped at runtime) should be regu
 
 ### Configuration Patterns
 
-**Simple single-interaction (e.g., item pickup):**
+**Single interaction (an item pickup):**
 ```
 InteractionOptions:
   [0] Type=Interaction.Type.Pickup, Text="Pick Up", Priority=0, bRequiresHold=false
 ```
 
-**Multi-option (e.g., loot container):**
+**Several options (a container):**
 ```
 InteractionOptions:
   [0] Type=Interaction.Type.Open, Text="Open", Priority=0, bRequiresHold=true, HoldDuration=1.0
   [1] Type=Interaction.Type.Inspect, Text="Inspect", Priority=1, bRequiresHold=false
 ```
 
-**Context-dependent (e.g., locked door):**
-Override `GetInteractionOptions` in Blueprint to check if the player has the key:
-```
-If player has key → [Open]
-Else → [Locked (greyed out)]
-```
+**Context-dependent (a locked door):** override `GetInteractionOptions` in Blueprint, or bind the native
+`OptionsModifier`, to show "Open" only to an interactor holding the key and "Locked" to everyone else. Call
+`NotifyOptionsChanged()` when the state behind the text changes.
 
-### Enable/Disable
+### Behaviour
 
-`bIsEnabled` on the InteractableComponent controls whether it appears in detection results. Use cases:
-- Chest already looted → disable
-- NPC in combat → disable dialogue interaction
-- Door animation playing → disable until animation completes
+`Interact(Interactor, Type)` runs the owner's `InteractionHandler` (bound in C++) and fires `OnInteractionTriggered`
+for Blueprint; it runs where the flow executes, the server.
 
-Disabling fires `OnInteractableLost` on any player currently targeting this interactable.
+### Enable / Disable
+
+`bIsEnabled` decides whether detection sees the component. It replicates and is `BlueprintReadOnly`: change it on the
+server with `Enable()`, `Disable()` or `SetEnabled()` (`OnStatusChanged` fires). Use cases: a looted chest, an NPC in
+combat, a door while it animates. Disabling fires `OnInteractableLost` on any player targeting it.
 
 ---
 
 ## Multiplayer Specifics
 
-### Interaction Validation on Server
-
-The server validates every interaction request:
+### Interaction Validation on the Server
 
 ```cpp
-void UInteractionComponent::ServerRPC_RequestInteract_Implementation(
-    AActor* TargetActor, FGameplayTag InteractionType)
+void UInteractionComponent::ServerRPC_RequestInteract_Implementation(AActor* TargetActor, FGameplayTag InteractionType)
 {
-    // 1. Actor validity
     if (!IsValid(TargetActor)) return;
 
-    // 2. Interface check
-    if (!TargetActor->Implements<UCGFInteractableInterface>()) return;
+    // Range, with 10% tolerance for latency
+    const float Distance = FVector::Dist(GetOwner()->GetActorLocation(), TargetActor->GetActorLocation());
+    if (Distance > InteractionRange * 1.1f)
+    {
+        ClientRPC_InteractionResult(TargetActor, InteractionType, EInteractionResult::OutOfRange);
+        return;
+    }
 
-    // 3. Range check (server re-validates, client may have stale data)
-    float Distance = FVector::Dist(GetOwner()->GetActorLocation(), TargetActor->GetActorLocation());
-    if (Distance > InteractionRange * 1.1f) return;  // 10% tolerance for latency
+    UInteractableComponent* Interactable = GetInteractable(TargetActor);    // FindComponentByClass
+    if (!Interactable || !Interactable->IsEnabled())
+    {
+        ClientRPC_InteractionResult(TargetActor, InteractionType, EInteractionResult::Failed);
+        return;
+    }
 
-    // 4. Can interact check
-    FInteractionContext Context;
-    Context.Interactor = GetOwner();
-    Context.InteractableActor = TargetActor;
-    Context.InteractionType = InteractionType;
-    Context.Distance = Distance;
+    const FInteractionContext Context = MakeContext(TargetActor, InteractionType);
+    if (!Interactable->CanInteract(GetOwner(), Context))
+    {
+        ClientRPC_InteractionResult(TargetActor, InteractionType, EInteractionResult::NotAllowed);
+        return;
+    }
 
-    if (!ICGFInteractableInterface::Execute_CanInteract(TargetActor, GetOwner(), Context)) return;
-
-    // 5. Execute
-    EInteractionResult Result = ICGFInteractableInterface::Execute_Interact(
-        TargetActor, GetOwner(), InteractionType);
-
-    // 6. Notify client of result
-    ClientRPC_InteractionResult(TargetActor, InteractionType, Result);
+    ClientRPC_InteractionResult(TargetActor, InteractionType, Interactable->Interact(GetOwner(), InteractionType));
 }
 ```
 
-**Range tolerance:** The server allows 10% extra range to account for network latency. Without this, a player at exactly max range might fail the server check because their position is slightly behind where they were on the client.
+The client runs the same checks before it sends (`ValidateInteraction`, without the tolerance), so most refusals never
+reach the network; the server repeats them inline (code review decision D-CR16). The 10% range tolerance absorbs the
+client being slightly ahead of where the server sees it.
 
 ### World Item Replication
 
-`AWorldItem` replicates:
-- `FItemInstance` (for display on clients)
-- Actor location/rotation (standard movement replication)
-- Hidden/visible state (for pool transitions)
-
-Clients use the replicated `FItemInstance` to display the correct mesh and interaction prompt. The actual pickup operation happens on the server — the client just sees the item disappear (via replication) and their inventory update (via FFastArraySerializer).
+`AWorldItem` replicates (`bReplicates`, not always relevant) and its `ItemInstance` is a replicated property. Clients
+see the item vanish when the server returns it to the pool and their inventory update through the
+`FFastArraySerializer`; the pickup itself happens only on the server.
