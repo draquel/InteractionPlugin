@@ -111,7 +111,10 @@ option's hold still waits the hold. Progress is not replicated; each machine cou
 damage cancel: the old `bCancelOnDamage` flag was never read, and the framework has no damage notification to wire it
 to (damage lives in the game layer's combat component), so it was removed; a game that wants it calls
 `CancelChanneledInteraction` from its own damage event on the server. Tests: `Interaction.Channeled.ServerCompletes` and
-`Interaction.Channeled.Refusals` (simulated server/client in one world).
+`Interaction.Channeled.Refusals` (simulated server/client in one world); over a real connection, the game module's
+`VoxelEngine.Replication.Framework` (a dedicated server and a client in PIE: a held option the server completes after
+its hold with its copy of the player, and `ClientRPC_InteractionResult` ending the client's channel), run by the
+in-editor gate.
 
 ---
 
