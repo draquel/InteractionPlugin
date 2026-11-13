@@ -77,9 +77,19 @@ InteractionPlugin/
   fallback cube at once, async-loads the `UItemFragment_WorldDisplay` mesh and applies `WorldMaterial`, `WorldScale`
   and `WorldRotation` (the lying pose) on load. Pickup hands the instance to the interactor's inventory
   (`ICGFInventoryInterface`, else a `UInventoryComponent` on the actor) and returns the actor to the pool.
+- What replicates is `ItemInstance` and `Rest` (`FWorldItemRest`: the resting location and rotation, the up, whether it
+  floats), not the mesh component and not movement. A client builds its copy's looks in `OnRep_ItemInstance`
+  (`ShowItem` / `HideItem`, the same functions the server uses) and places it in `OnRep_Rest`. Anything new the item
+  shows or the place it rests must go through one of the two, or a client never sees it (G203).
+- `SnapToGround` (the server) settles the item: at the water's surface when CommonGameFramework's `UCGFWaterSubsystem`
+  says the item is in or just over water (`bFloatOnWater`; the game layer registers the provider, the framework knows
+  no world), else on the ground under it; it records `Rest` either way. A floating item is drawn bobbing about `Rest`
+  on machines with a view (`GetFloatingPose`, the actor's tick, never on a dedicated server): the drawn transform is
+  not the resting place, so settle from `Rest.Location` and `PoseRotation`, never from the actor's current transform.
 - `UWorldItemPoolSubsystem::SpawnWorldItem(Item, Location, Rotation)` / `GetWorldItem` / `ReturnWorldItem` /
   `ReturnAllWorldItems`; pre-warmed, capped, despawn timeout. The pool is for runtime drops (loot bursts, inventory
-  drops); placed items are regular actors.
+  drops); placed items are regular actors. `SettleItems(Bounds)` settles the active items in some bounds again; the
+  pool calls it when the water changes there (`UCGFWaterSubsystem::OnWaterChanged`).
 - Pooled items wait hidden, without collision or physics, at `ParkingLocation` (default (0, 0, -100,000), far under a
   flat world's ground). `SetParkingLocation` moves the spot and every waiting item; game code calls it for a world whose
   ground passes through the default (VoxelCharacterPlugin's game mode parks them at a planet's centre).
