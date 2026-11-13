@@ -110,8 +110,20 @@ public:
 	UFUNCTION(BlueprintPure, Category = "WorldItemPool")
 	FVector GetGravityCenter() const { return GravityCenter; }
 
+	/**
+	 * Settle again every active item inside some bounds (AWorldItem::SnapToGround): onto the ground, or at the water's
+	 * surface as it is now. The pool does it when the world's water says it changed there
+	 * (UCGFWaterSubsystem::OnWaterChanged); game code may call it after it changes the ground under items.
+	 * Authority only: on a client nothing moves.
+	 * @param Bounds World bounds (an invalid box: every active item)
+	 * @return How many items were settled
+	 */
+	UFUNCTION(BlueprintCallable, Category = "WorldItemPool")
+	int32 SettleItems(const FBox& Bounds);
+
 protected:
 	virtual void OnWorldBeginPlay(UWorld& InWorld) override;
+	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
 
 private:
@@ -123,6 +135,10 @@ private:
 
 	/** Spawn a single pooled actor and reset it */
 	AWorldItem* SpawnPooledActor();
+
+	/** The world's water changed inside these bounds (UCGFWaterSubsystem::OnWaterChanged): the items there settle again. */
+	UFUNCTION()
+	void HandleWaterChanged(const FBox& Bounds);
 
 	/** The gravity centre spawned items use (SetGravityCenter). */
 	bool bHasGravityCenter = false;
