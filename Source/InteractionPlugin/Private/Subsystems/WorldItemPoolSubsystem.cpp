@@ -1,8 +1,21 @@
 #include "Subsystems/WorldItemPoolSubsystem.h"
 #include "InteractionPlugin.h"
 #include "Actors/WorldItem.h"
+#include "Subsystems/CGFWaterSubsystem.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
+
+void UWorldItemPoolSubsystem::Initialize(FSubsystemCollectionBase& Collection)
+{
+	Super::Initialize(Collection);
+
+	// An item floats at the water's surface as it was when it settled: when the water's owner says it changed, the
+	// items there settle again (a notification, never a poll).
+	if (UCGFWaterSubsystem* Water = Collection.InitializeDependency<UCGFWaterSubsystem>())
+	{
+		Water->OnWaterChanged.AddUniqueDynamic(this, &UWorldItemPoolSubsystem::HandleWaterChanged);
+	}
+}
 
 void UWorldItemPoolSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 {
@@ -22,6 +35,10 @@ void UWorldItemPoolSubsystem::Deinitialize()
 {
 	if (UWorld* World = GetWorld())
 	{
+		if (UCGFWaterSubsystem* Water = World->GetSubsystem<UCGFWaterSubsystem>())
+		{
+			Water->OnWaterChanged.RemoveDynamic(this, &UWorldItemPoolSubsystem::HandleWaterChanged);
+		}
 		World->GetTimerManager().ClearTimer(PreWarmTimerHandle);
 
 		// Clear all despawn timers
@@ -155,6 +172,31 @@ void UWorldItemPoolSubsystem::SetParkingLocation(const FVector& NewLocation)
 		}
 	}
 	UE_LOG(LogIAP, Log, TEXT("Parking at %s (%d waiting item(s) moved)."), *ParkingLocation.ToCompactString(), AvailablePool.Num());
+}
+
+int32 UWorldItemPoolSubsystem::SettleItems(const FBox& Bounds)
+{
+	int32 Settled = 0;
+	for (AWorldItem* Item : ActiveItems)
+	{
+		// The item's resting place decides (a floating item bobs about it on a machine with a view).
+		if (IsValid(Item) && Item->HasAuthority() && Item->bSnapToGround
+			&& (!Bounds.IsValid || Bounds.IsInsideOrOn(Item->Rest.bValid ? Item->Rest.Location : Item->GetActorLocation())))
+		{
+			Item->SnapToGround();
+			++Settled;
+		}
+	}
+	return Settled;
+}
+
+void UWorldItemPoolSubsystem::HandleWaterChanged(const FBox& Bounds)
+{
+	const int32 Settled = SettleItems(Bounds);
+	if (Settled > 0)
+	{
+		UE_LOG(LogIAP, Log, TEXT("The water changed: %d world item(s) settled again."), Settled);
+	}
 }
 
 void UWorldItemPoolSubsystem::ReturnAllWorldItems()

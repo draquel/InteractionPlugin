@@ -10,6 +10,7 @@
 #include "Engine/StaticMesh.h"
 #include "Components/StaticMeshComponent.h"
 #include "Subsystems/WorldItemPoolSubsystem.h"
+#include "Subsystems/CGFWaterSubsystem.h"
 #include "Engine/World.h"
 #include "Net/UnrealNetwork.h"
 #include "UObject/ConstructorHelpers.h"
@@ -18,6 +19,9 @@ AWorldItem::AWorldItem()
 {
 	bReplicates = true;
 	bAlwaysRelevant = false;
+	// Ticks only while it floats, to draw the bob (UpdateFloatTick).
+	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bStartWithTickEnabled = false;
 
 	MeshComponent = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("MeshComponent"));
 	RootComponent = MeshComponent;
@@ -57,6 +61,7 @@ void AWorldItem::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifeti
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 	DOREPLIFETIME(AWorldItem, ItemInstance);
+	DOREPLIFETIME(AWorldItem, Rest);
 }
 
 // ===========================================================================
@@ -66,6 +71,7 @@ void AWorldItem::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifeti
 void AWorldItem::InitializeFromItem(const FItemInstance& Item)
 {
 	ItemInstance = Item;
+	PoseRotation = GetActorQuat();
 	if (bHasGravityCenter)
 	{
 		// The pool has just stood the actor upright on local up (UWorldItemPoolSubsystem::SpawnWorldItem): the frame the
@@ -73,29 +79,40 @@ void AWorldItem::InitializeFromItem(const FItemInstance& Item)
 		UprightRotation = GetActorQuat();
 	}
 
-	UItemDatabaseSubsystem* DB = GetItemDatabase();
-	if (!DB)
+	if (UItemDefinition* Def = ShowItem())
 	{
-		return;
+		// Configure interaction options
+		FInteractionOption PickupOption;
+		PickupOption.InteractionType = CGFGameplayTags::Interaction_Type_Pickup;
+		PickupOption.DisplayText = FText::Format(
+			NSLOCTEXT("WorldItem", "PickupFormat", "Pick Up {0}"),
+			Def->DisplayName);
+		PickupOption.Priority = 0;
+		PickupOption.bRequiresHold = false;
+		InteractableComponent->InteractionOptions.Reset();
+		InteractableComponent->InteractionOptions.Add(PickupOption);
+		InteractableComponent->Enable();
 	}
 
-	UItemDefinition* Def = DB->GetDefinition(Item.ItemDefinitionId);
+	// Where it stands until it settles (SnapToGround publishes again).
+	PublishRest(false, GetSettleUp());
+}
+
+UItemDefinition* AWorldItem::ShowItem()
+{
+	UItemDatabaseSubsystem* DB = GetItemDatabase();
+	UItemDefinition* Def = DB ? DB->GetDefinition(ItemInstance.ItemDefinitionId) : nullptr;
 	if (!Def)
 	{
-		return;
+		return nullptr;
 	}
 
-	// Configure interaction options
-	FInteractionOption PickupOption;
-	PickupOption.InteractionType = CGFGameplayTags::Interaction_Type_Pickup;
-	PickupOption.DisplayText = FText::Format(
-		NSLOCTEXT("WorldItem", "PickupFormat", "Pick Up {0}"),
-		Def->DisplayName);
-	PickupOption.Priority = 0;
-	PickupOption.bRequiresHold = false;
-	InteractableComponent->InteractionOptions.Reset();
-	InteractableComponent->InteractionOptions.Add(PickupOption);
-	InteractableComponent->Enable();
+	// A pooled actor's earlier load must not land on this item.
+	if (MeshLoadHandle.IsValid())
+	{
+		MeshLoadHandle->CancelHandle();
+		MeshLoadHandle.Reset();
+	}
 
 	// Show the placeholder immediately and unhide the ACTOR — ResetForPool hides at the actor
 	// level, and only OnMeshLoaded cleared it, so items whose definition has no WorldDisplay
@@ -105,7 +122,11 @@ void AWorldItem::InitializeFromItem(const FItemInstance& Item)
 	{
 		MeshComponent->SetStaticMesh(FallbackMesh);
 		MeshComponent->SetWorldScale3D(FVector(0.25f));
-		ApplyRestingPose(FRotator::ZeroRotator);
+		if (HasAuthority())
+		{
+			// The pose is the server's: a client's copy takes its rotation from Rest.
+			ApplyRestingPose(FRotator::ZeroRotator);
+		}
 	}
 	SetActorHiddenInGame(false);
 	MeshComponent->SetVisibility(true);
@@ -124,6 +145,22 @@ void AWorldItem::InitializeFromItem(const FItemInstance& Item)
 	// Enable collision for overlap detection (no physics — items stay where spawned)
 	MeshComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	MeshComponent->SetSimulatePhysics(false);
+	return Def;
+}
+
+void AWorldItem::HideItem()
+{
+	// Cancel any pending async load
+	if (MeshLoadHandle.IsValid())
+	{
+		MeshLoadHandle->CancelHandle();
+		MeshLoadHandle.Reset();
+	}
+
+	SetActorHiddenInGame(true);
+	MeshComponent->SetVisibility(false);
+	MeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	MeshComponent->SetStaticMesh(nullptr);
 }
 
 void AWorldItem::OnMeshLoaded()
@@ -162,15 +199,27 @@ void AWorldItem::OnMeshLoaded()
 	}
 
 	MeshComponent->SetWorldScale3D(DisplayFrag->WorldScale);
-	// The lying pose: a mesh authored upright (a sword, blade +Z) rests flat on the ground.
-	ApplyRestingPose(DisplayFrag->WorldRotation);
 	SetActorHiddenInGame(false);
 	MeshComponent->SetVisibility(true);
 
-	// The real mesh's bounds differ from the placeholder's: settle again so it lies on the ground, not in or over it.
+	if (!HasAuthority())
+	{
+		// A client's copy: the mesh and its scale are its own to build; the place and the pose are the server's (Rest).
+		return;
+	}
+
+	// The lying pose: a mesh authored upright (a sword, blade +Z) rests flat on the ground.
+	ApplyRestingPose(DisplayFrag->WorldRotation);
+
+	// The real mesh's bounds differ from the placeholder's: settle again so it lies on the ground or at the water's
+	// surface, not in or over it. Either way the new pose reaches the clients.
 	if (bSnapToGround)
 	{
 		SnapToGround();
+	}
+	else
+	{
+		PublishRest(false, GetSettleUp());
 	}
 }
 
@@ -188,6 +237,30 @@ void AWorldItem::ApplyRestingPose(const FRotator& Pose)
 	{
 		MeshComponent->SetRelativeRotation(Pose);
 	}
+	PoseRotation = GetActorQuat();
+}
+
+FVector AWorldItem::GetSettleUp() const
+{
+	return bHasGravityCenter ? (GetActorLocation() - GravityCenter).GetSafeNormal(UE_SMALL_NUMBER, FVector::UpVector) : FVector::UpVector;
+}
+
+void AWorldItem::GetExtentAlong(const FVector& Up, double& OutLowest, double& OutHighest) const
+{
+	// The mesh's local box, corner by corner: the item may lie in any pose, and up may be any direction.
+	const FBox LocalBox = MeshComponent->CalcLocalBounds().GetBox();
+	const FTransform& MeshTransform = MeshComponent->GetComponentTransform();
+	const FVector Location = GetActorLocation();
+	OutLowest = TNumericLimits<double>::Max();
+	OutHighest = TNumericLimits<double>::Lowest();
+	for (int32 Corner = 0; Corner < 8; ++Corner)
+	{
+		const FVector LocalCorner((Corner & 1) ? LocalBox.Max.X : LocalBox.Min.X, (Corner & 2) ? LocalBox.Max.Y : LocalBox.Min.Y,
+			(Corner & 4) ? LocalBox.Max.Z : LocalBox.Min.Z);
+		const double Along = FVector::DotProduct(MeshTransform.TransformPosition(LocalCorner) - Location, Up);
+		OutLowest = FMath::Min(OutLowest, Along);
+		OutHighest = FMath::Max(OutHighest, Along);
+	}
 }
 
 bool AWorldItem::SnapToGround()
@@ -198,67 +271,179 @@ bool AWorldItem::SnapToGround()
 		return false;
 	}
 
+	// A floating item is drawn bobbing and rocking about its resting place on a machine with a view: settle from the
+	// place and the pose themselves, or the drawn offset would become the next resting place.
+	if (IsFloating())
+	{
+		SetActorLocationAndRotation(Rest.Location, PoseRotation);
+	}
+
 	// Start just above the item so a drop in a low room never lands on the ceiling's far side; search a few metres
-	// down (drops spawn near a pawn's centre or a creature's body, well above the floor).
+	// down (drops spawn near a pawn's centre or a creature's body, well above the floor). Along local down from the
+	// gravity centre on a planet, world -Z otherwise.
 	constexpr float TraceUp = 50.0f;
 	constexpr float TraceDown = 500.0f;
 	const FVector Location = GetActorLocation();
+	const FVector Up = GetSettleUp();
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(WorldItemSnapToGround), false, this);
+	const FCollisionObjectQueryParams Ground(ECC_WorldStatic);
 	FHitResult Hit;
-	if (bHasGravityCenter)
+	const bool bGround = World->LineTraceSingleByObjectType(Hit, Location + Up * TraceUp, Location - Up * TraceDown, Ground, Params);
+
+	// Water first: an item in the water, or dropped from within the trace's reach over it, rests at the surface
+	// straight over where it is, not on the bed. The world's water is the game layer's to say (UCGFWaterSubsystem);
+	// with no provider there is none.
+	if (bFloatOnWater)
 	{
-		// Along local down from the gravity centre; the mesh's lowest corner along local up rests on the hit.
-		const FVector Up = (Location - GravityCenter).GetSafeNormal();
-		if (!World->LineTraceSingleByObjectType(Hit, Location + Up * TraceUp, Location - Up * TraceDown, FCollisionObjectQueryParams(ECC_WorldStatic), Params))
+		const UCGFWaterSubsystem* Water = World->GetSubsystem<UCGFWaterSubsystem>();
+		FCGFWaterSurfaceSample Sample;
+		if (Water && Water->SampleWaterSurface(Location, TraceDown, Sample) && Sample.bWater)
 		{
-			return false;
+			const FVector WaterUp = Sample.Up.GetSafeNormal(UE_SMALL_NUMBER, Up);
+			// Ground between the item and the surface (a pier, a rock standing out of the water) or water too shallow to
+			// float in: the ground has it.
+			bool bFloat = !bGround || FVector::DotProduct(Sample.SurfacePoint - Hit.ImpactPoint, WaterUp) >= MinFloatWaterDepth;
+			if (bFloat && Sample.Depth > 0.0)
+			{
+				// Under the water: nothing solid may lie between the item and the surface over it (a flooded cave's roof).
+				FHitResult Roof;
+				bFloat = !World->LineTraceSingleByObjectType(Roof, Location, Sample.SurfacePoint, Ground, Params);
+			}
+			if (bFloat)
+			{
+				double Lowest = 0.0;
+				double Highest = 0.0;
+				GetExtentAlong(WaterUp, Lowest, Highest);
+				SetActorLocation(Sample.SurfacePoint - WaterUp * (Lowest + FloatSubmersion * (Highest - Lowest)));
+				PublishRest(true, WaterUp);
+				return true;
+			}
 		}
-		const FBox LocalBox = MeshComponent->CalcLocalBounds().GetBox();
-		const FTransform& MeshTransform = MeshComponent->GetComponentTransform();
-		double Lowest = TNumericLimits<double>::Max();
-		for (int32 Corner = 0; Corner < 8; ++Corner)
-		{
-			const FVector LocalCorner((Corner & 1) ? LocalBox.Max.X : LocalBox.Min.X, (Corner & 2) ? LocalBox.Max.Y : LocalBox.Min.Y,
-				(Corner & 4) ? LocalBox.Max.Z : LocalBox.Min.Z);
-			Lowest = FMath::Min(Lowest, FVector::DotProduct(MeshTransform.TransformPosition(LocalCorner) - Location, Up));
-		}
-		SetActorLocation(Hit.ImpactPoint + Up * (-Lowest + 1.0));
-		return true;
 	}
-	if (!World->LineTraceSingleByObjectType(Hit, Location + FVector(0.0f, 0.0f, TraceUp), Location - FVector(0.0f, 0.0f, TraceDown),
-		FCollisionObjectQueryParams(ECC_WorldStatic), Params))
+
+	if (!bGround)
 	{
+		PublishRest(false, Up);
 		return false;
 	}
 
-	MeshComponent->UpdateBounds();
-	const FBoxSphereBounds& Bounds = MeshComponent->Bounds;
-	const float PivotAboveBottom = Location.Z - (Bounds.Origin.Z - Bounds.BoxExtent.Z);
-	SetActorLocation(FVector(Location.X, Location.Y, Hit.ImpactPoint.Z + PivotAboveBottom + 1.0f));
+	// The mesh's lowest corner along up rests a unit over the hit.
+	double Lowest = 0.0;
+	double Highest = 0.0;
+	GetExtentAlong(Up, Lowest, Highest);
+	SetActorLocation(Hit.ImpactPoint + Up * (1.0 - Lowest));
+	PublishRest(false, Up);
 	return true;
+}
+
+// ===========================================================================
+// The resting place and the bob
+// ===========================================================================
+
+void AWorldItem::PublishRest(bool bFloating, const FVector& Up)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+	Rest.bValid = true;
+	Rest.bFloating = bFloating;
+	Rest.Location = GetActorLocation();
+	Rest.Rotation = GetActorRotation();
+	Rest.Up = Up;
+	UpdateFloatTick();
+}
+
+void AWorldItem::OnRep_ItemInstance()
+{
+	// A client's copy shows nothing of its own accord: the server's mesh component does not replicate.
+	if (ItemInstance.IsValid())
+	{
+		ShowItem();
+	}
+	else
+	{
+		HideItem();
+	}
+}
+
+void AWorldItem::OnRep_Rest()
+{
+	if (Rest.bValid)
+	{
+		SetActorLocationAndRotation(Rest.Location, Rest.Rotation, false, nullptr, ETeleportType::TeleportPhysics);
+	}
+	UpdateFloatTick();
+}
+
+void AWorldItem::UpdateFloatTick()
+{
+	// The bob is something to look at: a dedicated server draws nothing and keeps the item at its resting place.
+	const bool bSeen = IsFloating() && GetNetMode() != NM_DedicatedServer;
+	SetActorTickEnabled(bSeen && (FloatBobAmplitude != 0.0f || FloatRockDegrees != 0.0f));
+	if (MeshComponent && MeshComponent->bRenderCustomDepth != (bSeen && bCustomDepthWhileFloating))
+	{
+		MeshComponent->SetRenderCustomDepth(bSeen && bCustomDepthWhileFloating);
+	}
+}
+
+void AWorldItem::GetFloatingPose(double TimeSeconds, FVector& OutLocation, FQuat& OutRotation) const
+{
+	OutLocation = Rest.Location;
+	OutRotation = Rest.Rotation.Quaternion();
+	if (!IsFloating())
+	{
+		return;
+	}
+	// A phase from the resting place, so items dropped together do not rise and fall as one.
+	const double Phase = FMath::Frac(Rest.Location.X * 0.0131 + Rest.Location.Y * 0.0073 + Rest.Location.Z * 0.0117) * UE_DOUBLE_TWO_PI;
+	const double Angle = UE_DOUBLE_TWO_PI * TimeSeconds / FMath::Max(static_cast<double>(FloatBobPeriod), 0.1) + Phase;
+	const FVector Up = Rest.Up;
+	OutLocation += Up * (static_cast<double>(FloatBobAmplitude) * FMath::Sin(Angle));
+	if (FloatRockDegrees != 0.0f)
+	{
+		// A rock about a level axis, a little slower than the bob so the two never lock into one motion.
+		const FVector Axis = FVector::CrossProduct(Up, FMath::Abs(Up.X) < 0.9 ? FVector::ForwardVector : FVector::RightVector).GetSafeNormal();
+		OutRotation = FQuat(Axis, FMath::DegreesToRadians(static_cast<double>(FloatRockDegrees)) * FMath::Sin(Angle * 0.73 + 1.3)) * OutRotation;
+	}
+}
+
+void AWorldItem::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+
+	const UWorld* World = GetWorld();
+	if (!World || !IsFloating())
+	{
+		UpdateFloatTick();
+		return;
+	}
+	// Nothing to draw for an item nobody has seen lately: it waits at whatever point of the bob it had.
+	if (!WasRecentlyRendered(0.5f))
+	{
+		return;
+	}
+	FVector Location;
+	FQuat Rotation;
+	GetFloatingPose(World->GetTimeSeconds(), Location, Rotation);
+	// The authority's copy moves too (a listen server's host sees the bob); Rest, not the transform, is what replicates.
+	SetActorLocationAndRotation(Location, Rotation, false, nullptr, ETeleportType::TeleportPhysics);
 }
 
 const FVector AWorldItem::DefaultParkingLocation(0.0, 0.0, -100000.0);
 
 void AWorldItem::ResetForPool(const FVector& ParkingLocation)
 {
-	// Cancel any pending async load
-	if (MeshLoadHandle.IsValid())
-	{
-		MeshLoadHandle->CancelHandle();
-		MeshLoadHandle.Reset();
-	}
-
-	SetActorHiddenInGame(true);
-	MeshComponent->SetVisibility(false);
-	MeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	HideItem();
 	MeshComponent->SetSimulatePhysics(false);
-	MeshComponent->SetStaticMesh(nullptr);
 
 	InteractableComponent->Disable();
 	InteractableComponent->InteractionOptions.Reset();
 
 	ItemInstance = FItemInstance();
+	// No resting place while pooled: a client's copy stops bobbing and waits for the next settle.
+	Rest = FWorldItemRest();
+	UpdateFloatTick();
 
 	DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
 	SetActorLocation(ParkingLocation);

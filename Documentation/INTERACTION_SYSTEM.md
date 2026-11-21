@@ -127,24 +127,74 @@ POOLED (hidden, parked) → InitializeFromItem → ACTIVE (in the world) → pic
                                                       └──────────→ despawn timeout → POOLED
 ```
 
-**`InitializeFromItem(FItemInstance)`:**
+**`InitializeFromItem(FItemInstance)`** (the server):
 1. Store the instance (`ItemInstance`, replicated).
-2. Add the "Pick Up <name>" option (`Interaction.Type.Pickup`) to the `UInteractableComponent` and enable it.
-3. Show the fallback cube at a quarter scale at once (items without a world mesh would otherwise be invisible pickups),
-   collision on, physics off.
-4. Look up the definition through `UItemDatabaseSubsystem`; when it has a `UItemFragment_WorldDisplay` mesh, request it
+2. Show the item (`ShowItem`, which a client runs too, from `OnRep_ItemInstance`): the fallback cube at a quarter scale
+   at once (items without a world mesh would otherwise be invisible pickups), collision on, physics off; look up the
+   definition through `UItemDatabaseSubsystem` and, when it has a `UItemFragment_WorldDisplay` mesh, request it
    asynchronously.
-5. On load (`OnMeshLoaded`): set the mesh, `WorldMaterial` and `WorldScale`, apply `WorldRotation` as the resting pose
-   (`ApplyRestingPose`) and `SnapToGround()`.
+3. Add the "Pick Up <name>" option (`Interaction.Type.Pickup`) to the `UInteractableComponent` and enable it.
+4. Record where the item stands (`Rest`, replicated; below).
+5. On load (`OnMeshLoaded`, every machine): set the mesh, `WorldMaterial` and `WorldScale`. The server then applies
+   `WorldRotation` as the resting pose (`ApplyRestingPose`) and settles the item again (`SnapToGround()`), because the
+   real mesh's bounds differ from the placeholder's.
+
+**Settling (`SnapToGround`, the server).** The item rests on what is below it: it traces 500 uu down (from 50 uu above
+itself) for `ECC_WorldStatic` and rests the mesh's lowest corner 1 uu over the hit; with no hit it stays where it was
+dropped. Water comes first (`bFloatOnWater`, on by default): the item asks `UCGFWaterSubsystem` for the water over its
+position (the next section), and in the water, or within the trace's 500 uu over it, it rests at the surface straight
+over where it is, `FloatSubmersion` (0.6) of its height under the surface. The ground keeps it where the ground lies
+between the item and the surface (a pier), where the water over the ground is shallower than `MinFloatWaterDepth`
+(20 uu), where something solid lies between an item under water and the surface over it (a flooded cave's roof), and
+where the provider says the place holds no water (a dry cave below the level). The settle runs at the spawn, after the
+mesh loads, and when the water changes (`UWorldItemPoolSubsystem::SettleItems`).
+
+**The resting place (`Rest`, `FWorldItemRest`).** Every settle records the item's location, its rotation, the up it
+rests along and whether it floats. The item does not replicate movement: a client places its copy by `OnRep_Rest`, so
+the server's second settle and the resting pose reach it (before, a client kept the place and the pose its copy first
+arrived with, 12 uu off after the mesh loaded: G203). The server keeps the resting rotation apart (`PoseRotation`), so a
+later settle starts from the pose and not from the rotation the item is drawn with.
+
+**The bob.** A floating item (`IsFloating()`) ticks on every machine with a view, never on a dedicated server, and is
+drawn about its resting place: `GetFloatingPose` adds a rise and fall along the rest's up (`FloatBobAmplitude` 2.5 uu,
+`FloatBobPeriod` 2.8 s, a phase from the place so items dropped together do not move as one) and a small rock
+(`FloatRockDegrees` 3). It is drawn, not replicated: each machine uses its own clock, `Rest` never changes, and an item
+nobody has seen in the last half second is left as it is. The tick is off for every item that does not float.
+
+On the same machines a floating item's mesh draws custom depth (`bCustomDepthWhileFloating`, on by default; off again
+when it no longer floats). A water material that shades by the water's depth, or draws foam where the water is thin,
+takes an item lying just under the surface for a shallow bed; with the item in custom depth it can tell the two apart
+(this project's water draws no shore foam over it, as over a swimmer).
 
 **Pickup (`OnPickupInteraction`, the component's handler):** find the interactor's inventory through
 `ICGFInventoryInterface` (else a `UInventoryComponent` on the actor), `TryAddItem(ItemInstance)`; on success return the
 actor through `UWorldItemPoolSubsystem::ReturnWorldItem`. On failure (inventory full) the item stays.
 
-**`ResetForPool(ParkingLocation)`:** cancel the mesh load, hide, collision and physics off, clear the mesh, disable and
-clear the interactable's options, clear the instance, detach, move to the parking location.
+**`ResetForPool(ParkingLocation)`:** cancel the mesh load, hide, collision and physics off, clear the mesh (`HideItem`,
+which a client runs when its copy's instance is cleared), disable and clear the interactable's options, clear the
+instance and the resting place, detach, move to the parking location.
 
 Never `LoadSynchronous` a world mesh in gameplay code: one mesh is a hitch, a loot burst of fifty is a freeze.
+
+### In Water
+
+The framework knows no world, so the water is whatever the game layer registers with CommonGameFramework's
+`UCGFWaterSubsystem` (an object implementing `ICGFWaterSurfaceInterface`; `Plugins/CommonGameFramework/Documentation/COMMON_TYPES.md`).
+`AWorldItem::SnapToGround` asks it for the surface over the item's position: the point of the surface, its up, the
+item's depth and whether water is really there. In this project VoxelCharacterPlugin's `UVCWaterSurfaceBridge` answers
+from the voxel world's water levels, on a plane (the level is a world Z), an island, a block world and a planet (the up
+is the radial and the level a radius). With no provider there is no water and an item settles as it did before.
+
+The answer is read per settle and never kept: a world may have several bodies of water, and a body's level may change.
+When the water's owner says it changed (`UCGFWaterSubsystem::NotifyWaterChanged(Bounds)`, or the provider being set or
+cleared), the pool settles the active items inside the bounds again (`UWorldItemPoolSubsystem::SettleItems`, bound to
+`OnWaterChanged`); nothing polls. A change of the ground under an item (a dig) does not move it; game code may call
+`SettleItems` for the place.
+
+Tests: `Interaction.WorldItem.FloatsOnWater` (a plane and a sphere from `UCGFTestWaterSurface`: the surface, the
+submersion, the bob, a pier, shallow water, a roof, a dry place, a changed level, no provider); with a voxel world,
+VoxelCharacterPlugin's `VoxelCharacter.Water.ItemFloats.*`; over a connection, the game module's
+`VoxelEngine.Replication.Framework` (the client's copy shown, at the server's resting place, bobbing).
 
 ### On a Planet
 
@@ -177,6 +227,7 @@ API:
     AWorldItem* SpawnWorldItem(Item, Location, Rotation)   a pooled actor, placed and initialised
     AWorldItem* GetWorldItem()                             a pooled actor, or nullptr when exhausted
     void ReturnWorldItem(AWorldItem*)                      ResetForPool and back to the pool
+    int32 SettleItems(Bounds)                              settle the active items in the bounds again (the water changed)
     void ReturnAllWorldItems()                             every active item back (level cleanup)
     SetParkingLocation, SetGravityCenter / ClearGravityCenter
 ```
@@ -257,6 +308,9 @@ client being slightly ahead of where the server sees it.
 
 ### World Item Replication
 
-`AWorldItem` replicates (`bReplicates`, not always relevant) and its `ItemInstance` is a replicated property. Clients
-see the item vanish when the server returns it to the pool and their inventory update through the
-`FFastArraySerializer`; the pickup itself happens only on the server.
+`AWorldItem` replicates (`bReplicates`, not always relevant) two properties: `ItemInstance` and `Rest`. Its mesh
+component does not replicate, so a client builds what its copy shows from the instance (`OnRep_ItemInstance`: `ShowItem`
+for a valid instance, the placeholder and then the definition's mesh, material and scale; `HideItem` when the server
+clears it) and places it by the resting place (`OnRep_Rest`). Before this a client's copy had no mesh and was not
+visible at all on a dedicated server's client (G203). Clients see the item vanish when the server returns it to the
+pool and their inventory update through the `FFastArraySerializer`; the pickup itself happens only on the server.
